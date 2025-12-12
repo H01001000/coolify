@@ -20,19 +20,6 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Horizon Domain
-    |--------------------------------------------------------------------------
-    |
-    | This is the subdomain where Horizon will be accessible from. If this
-    | setting is null, Horizon will reside under the same domain as the
-    | application. Otherwise, this value will serve as the subdomain.
-    |
-    */
-
-    'domain' => env('HORIZON_DOMAIN'),
-
-    /*
-    |--------------------------------------------------------------------------
     | Horizon Path
     |--------------------------------------------------------------------------
     |
@@ -55,7 +42,7 @@ return [
     |
     */
 
-    'use' => 'default',
+    'use' => 'jobs',
 
     /*
     |--------------------------------------------------------------------------
@@ -70,7 +57,7 @@ return [
 
     'prefix' => env(
         'HORIZON_PREFIX',
-        Str::slug(env('APP_NAME', 'laravel'), '_').'_horizon:',
+        Str::slug((string) env('APP_NAME', 'coolify'), '_').'_horizon:',
     ),
 
     /*
@@ -198,34 +185,94 @@ return [
     */
 
     'defaults' => [
-        'supervisor-1' => [
-            'connection' => 'redis',
-            'queue' => ['default'],
-            'balance' => 'auto',
-            'autoScalingStrategy' => 'time',
-            'maxProcesses' => 1,
-            'maxTime' => 0,
-            'maxJobs' => 0,
-            'memory' => 128,
-            'tries' => 1,
-            'timeout' => 60,
-            'nice' => 0,
-        ],
+        ...((bool) env('IS_WORKER_SERVER', false) ? [] : [
+            'jobs' => [
+                'connection' => 'redis',
+                'queue' => ['high', 'default', 'production-deployment', 'standard-deployment'],
+                'balance' => false,
+                'autoScalingStrategy' => 'time',
+                'maxProcesses' => 1,
+                'maxTime' => 0,
+                'maxJobs' => 0,
+                'memory' => 128,
+                'tries' => 1,
+                'timeout' => 60,
+                'nice' => 0,
+            ],
+            'deployments' => [
+                'connection' => 'redis',
+                'queue' => ['production-deployment', 'standard-deployment', 'high', 'default'],
+                'balance' => false,
+                'autoScalingStrategy' => 'time',
+                'maxProcesses' => 1,
+                'maxTime' => 0,
+                'maxJobs' => 0,
+                'memory' => 128,
+                'tries' => 1,
+                'timeout' => 60,
+                'nice' => 0,
+            ],
+        ]),
+        ...((bool) env('IS_WORKER_SERVER', false) ? [
+            'worker-jobs' => [
+                'connection' => 'redis',
+                'queue' => ['worker-high', 'worker-default', 'worker-production-deployment', 'worker-standard-deployment'],
+                'balance' => false,
+                'autoScalingStrategy' => 'time',
+                'maxProcesses' => 1,
+                'maxTime' => 0,
+                'maxJobs' => 0,
+                'memory' => 128,
+                'tries' => 1,
+                'timeout' => 60,
+                'nice' => 0,
+            ],
+            'worker-deployments' => [
+                'connection' => 'redis',
+                'queue' => ['worker-production-deployment', 'worker-standard-deployment', 'worker-high', 'worker-default'],
+                'balance' => false,
+                'autoScalingStrategy' => 'time',
+                'maxProcesses' => 1,
+                'maxTime' => 0,
+                'maxJobs' => 0,
+                'memory' => 128,
+                'tries' => 1,
+                'timeout' => 60,
+                'nice' => 0,
+            ],
+        ] : []),
     ],
 
     'environments' => [
-        'production' => [
-            'supervisor-1' => [
-                'maxProcesses' => 10,
-                'balanceMaxShift' => 1,
-                'balanceCooldown' => 3,
-            ],
-        ],
-
-        'local' => [
-            'supervisor-1' => [
-                'maxProcesses' => 3,
-            ],
+        '*' => [
+            ...((bool) env('IS_WORKER_SERVER', false) ? [] : [
+                'jobs' => [
+                    'minProcesses' => env('HORIZON_JOBS_MIN_PROCESSES', 1),
+                    'maxProcesses' => env('HORIZON_JOBS_MAX_PROCESSES', 4),
+                    'balanceMaxShift' => env('HORIZON_JOBS_BALANCE_MAX_SHIFT', 1),
+                    'balanceCooldown' => env('HORIZON_JOBS_BALANCE_COOLDOWN', 1),
+                ],
+                'deployments' => [
+                    'minProcesses' => env('HORIZON_DEPLOYMENTS_MIN_PROCESSES', 1),
+                    'maxProcesses' => env('HORIZON_DEPLOYMENTS_MAX_PROCESSES', 2),
+                    'balanceMaxShift' => env('HORIZON_DEPLOYMENTS_BALANCE_MAX_SHIFT', 1),
+                    'balanceCooldown' => env('HORIZON_DEPLOYMENTS_BALANCE_COOLDOWN', 1),
+                ],
+            ]),
+            ...((bool) env('IS_WORKER_SERVER', false) ? [
+                'worker-jobs' => [
+                    'minProcesses' => env('HORIZON_JOBS_MIN_PROCESSES', 1),
+                    'maxProcesses' => env('HORIZON_JOBS_MAX_PROCESSES', 4),
+                    'balanceMaxShift' => env('HORIZON_JOBS_BALANCE_MAX_SHIFT', 1),
+                    'balanceCooldown' => env('HORIZON_JOBS_BALANCE_COOLDOWN', 1),
+                ],
+                'worker-deployments' => [
+                    'minProcesses' => env('HORIZON_DEPLOYMENTS_MIN_PROCESSES', 1),
+                    'maxProcesses' => env('HORIZON_DEPLOYMENTS_MAX_PROCESSES', 2),
+                    'balanceMaxShift' => env('HORIZON_DEPLOYMENTS_BALANCE_MAX_SHIFT', 1),
+                    'balanceCooldown' => env('HORIZON_DEPLOYMENTS_BALANCE_COOLDOWN', 1),
+                ],
+            ] : []),
         ],
     ],
 ];
