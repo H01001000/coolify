@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - **v4 to v5 upgrade migration**
   - Added Coolify v4 database as `old_pgsql` connection
   -
+- Worker Servers support which will replace build servers with servers that can also run jobs in addition to building applications
 
 ### Changed
 
@@ -25,6 +26,8 @@ All notable changes to this project will be documented in this file.
   - Use Redis for sessions and expire inactive sessions after 24h (previously 14 days)
   - Encrypt user sessions data
   - Expire password reset tokens after 10 minutes (previously 60 minutes)
+  - Jobs now wait for all DB transactions to be committed before starting which prevents race conditions
+  -
   - Redirect Laravel logs to `stderr` so they can be viewed in docker logs
   - Configured production logging to rotate automatically and keep only the last 10 days of logs to reduce disk usage
   - Changed production log level from `debug` to `warning` to reduce disk usage and avoid logging sensitive information
@@ -44,6 +47,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - `laravel.log` file growing indefinitely and consuming excessive disk space
+- Removed logging of failed jobs into the database as we use Horizon for that and because it can cause excessive disk usage when there are many failed jobs
 -
 
 ### Security
@@ -70,6 +74,7 @@ All notable changes to this project will be documented in this file.
     - Automatically eager load all relationships to prevent N+1 queries
     - Configure models and enforce morph map for polymorphic relationships
     - Enforce immutable dates globally
+    - Disable queue interruption polling to improve performance
     - Fake sleeps and prevent stray HTTP requests in testing
     - Prevent exception truncation in development
     - Use aggressive Vite prefetching for better performance
@@ -90,6 +95,7 @@ All notable changes to this project will be documented in this file.
 
 - Completely refactored all database migrations for a cleaner, more consistent and stable database schema
 - Completely refactored all database models
+- Queues are now accessed via an enum instead of hardcoded strings
 
 ## Issues
 
