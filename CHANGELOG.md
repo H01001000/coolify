@@ -88,7 +88,7 @@ All notable changes to this project will be documented in this file.
   - Cancel in-progress action runs when a new run is triggered
   - Improved `SECURITY.md` formatting and wording and added the support policy for `v5.x`
   - Refactored the GitHub issue templates to use issue types and improved formatting and wording
-  - Moved `README.md` assets into `.github/assets/` to easier exclude them from the core repository code
+  - Moved `README.md` assets into `.github/assets/` to more easily exclude them from the core repository code
   - Removed the `chore-remove-labels-and-assignees-on-close.yml` workflow as labels and assignees are now kept when closing Issues and PRs
 
 ### Refactored
