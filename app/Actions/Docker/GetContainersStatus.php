@@ -56,19 +56,6 @@ class GetContainersStatus
             return 'Server is not functional.';
         }
         $this->applications = $this->server->applications();
-        $skip_these_applications = collect([]);
-        foreach ($this->applications as $application) {
-            if ($application->additional_servers->count() > 0) {
-                $skip_these_applications->push($application);
-                ComplexStatusCheck::run($application);
-                $this->applications = $this->applications->filter(function ($value, $key) use ($application) {
-                    return $value->id !== $application->id;
-                });
-            }
-        }
-        $this->applications = $this->applications->filter(function ($value, $key) use ($skip_these_applications) {
-            return ! $skip_these_applications->pluck('id')->contains($value->id);
-        });
         if ($this->containers === null) {
             ['containers' => $this->containers, 'containerReplicates' => $this->containerReplicates] = $this->server->getContainers();
         }
@@ -98,6 +85,25 @@ class GetContainersStatus
                 });
             }
         }
+        // Each server check already has a container snapshot. Reuse it for
+        // multi-server applications instead of rechecking every destination.
+        $multiServerApplications = $this->applications->filter(fn ($application) => $application->additional_servers->isNotEmpty());
+        foreach ($multiServerApplications as $application) {
+            if ($this->server->isSwarm()) {
+                ComplexStatusCheck::run($application);
+            } else {
+                $applicationContainers = $this->containers->filter(function ($container) use ($application) {
+                    $labels = data_get($container, 'Config.Labels', []);
+
+                    return (string) ($labels['coolify.applicationId'] ?? null) === (string) $application->id
+                        && (string) ($labels['coolify.pullRequestId'] ?? null) === '0'
+                        && data_get($container, 'State.Running', false);
+                });
+                ComplexStatusCheck::run($application, $this->server, $applicationContainers);
+            }
+        }
+        $this->applications = $this->applications->reject(fn ($application) => $multiServerApplications->contains('id', $application->id));
+
         $databases = $this->server->databases();
         $services = $this->server->services()->get();
         $previews = $this->server->previews();

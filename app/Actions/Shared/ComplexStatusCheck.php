@@ -3,8 +3,10 @@
 namespace App\Actions\Shared;
 
 use App\Models\Application;
+use App\Models\Server;
 use App\Services\ContainerStatusAggregator;
 use App\Traits\CalculatesExcludedStatus;
+use Illuminate\Support\Collection;
 use Lorisleiva\Actions\Concerns\AsAction;
 
 class ComplexStatusCheck
@@ -12,10 +14,11 @@ class ComplexStatusCheck
     use AsAction;
     use CalculatesExcludedStatus;
 
-    public function handle(Application $application)
+    public function handle(Application $application, ?Server $onlyServer = null, ?Collection $containers = null)
     {
-        $servers = $application->additional_servers;
-        $servers->push($application->destination->server);
+        $servers = $onlyServer
+            ? collect([$onlyServer])
+            : $application->additional_servers->concat([$application->destination->server]);
         foreach ($servers as $server) {
             $is_main_server = $application->destination->server->id === $server->id;
             if (! $server->isFunctional()) {
@@ -29,11 +32,14 @@ class ComplexStatusCheck
                     continue;
                 }
             }
-            $containers = instant_remote_process(["docker container inspect $(docker container ls -q --filter 'label=coolify.applicationId={$application->id}' --filter 'label=coolify.pullRequestId=0') --format '{{json .}}'"], $server, false);
-            $containers = format_docker_command_output_to_json($containers);
+            $serverContainers = $containers;
+            if ($serverContainers === null) {
+                $output = instant_remote_process(["docker container inspect $(docker container ls -q --filter 'label=coolify.applicationId={$application->id}' --filter 'label=coolify.pullRequestId=0') --format '{{json .}}'"], $server, false);
+                $serverContainers = format_docker_command_output_to_json($output);
+            }
 
-            if ($containers->count() > 0) {
-                $statusToSet = $this->aggregateContainerStatuses($application, $containers);
+            if ($serverContainers->count() > 0) {
+                $statusToSet = $this->aggregateContainerStatuses($application, $serverContainers);
 
                 if ($is_main_server) {
                     $statusFromDb = $application->status;
