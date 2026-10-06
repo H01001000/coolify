@@ -1284,10 +1284,10 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
     $options = [];
     $compose_options = collect([]);
     preg_match_all('/(--\w+(?:-\w+)*)(?:\s|=)?([^\s-]+)?/', $custom_docker_run_options, $matches, PREG_SET_ORDER);
-    // Supplementary groups are repeatable, including named groups containing hyphens.
-    preg_match_all('/(?:^|\s)--group-add(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|((?!--)[^\s]+))/', $custom_docker_run_options ?? '', $group_matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL);
-    foreach ($group_matches as $group_match) {
-        $options['--group-add'][] = $group_match[1] ?? $group_match[2] ?? $group_match[3];
+    // Parse identity options separately to preserve quotes and hyphenated names.
+    preg_match_all('/(?:^|\s)(--group-add|--user)(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|((?!--)[^\s]+))/', $custom_docker_run_options ?? '', $identity_matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL);
+    foreach ($identity_matches as $identity_match) {
+        $options[$identity_match[1]][] = $identity_match[2] ?? $identity_match[3] ?? $identity_match[4];
     }
     if (isset($options['--group-add'])) {
         $options['--group-add'] = array_values(array_unique($options['--group-add']));
@@ -1317,13 +1317,14 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
         '--shm-size' => 'shm_size',
         '--dns' => 'dns',
         '--group-add' => 'group_add',
+        '--user' => 'user',
         '--gpus' => 'gpus',
         '--hostname' => 'hostname',
         '--entrypoint' => 'entrypoint',
     ]);
     foreach ($matches as $match) {
         $option = $match[1];
-        if ($option === '--group-add') {
+        if ($option === '--group-add' || $option === '--user') {
             continue;
         }
         if ($option === '--gpus') {
@@ -1411,6 +1412,9 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
                 }
             });
             $compose_options->put($mapping[$option], $ulimits);
+        } elseif ($option === '--user') {
+            // Docker uses the last --user value; Compose expects a scalar string.
+            $compose_options->put($mapping[$option], end($value));
         } elseif ($option === '--shm-size' || $option === '--hostname') {
             if (! is_null($value) && is_array($value) && count($value) > 0 && ! empty(trim($value[0]))) {
                 $compose_options->put($mapping[$option], $value[0]);
