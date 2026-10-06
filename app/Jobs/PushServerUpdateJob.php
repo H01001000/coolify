@@ -10,7 +10,6 @@ use App\Actions\Proxy\CheckProxy;
 use App\Actions\Proxy\StartProxy;
 use App\Actions\Server\StartLogDrain;
 use App\Actions\Service\StopServiceApplication;
-use App\Actions\Shared\ComplexStatusCheck;
 use App\Models\Application;
 use App\Models\ApplicationPreview;
 use App\Models\Server;
@@ -30,6 +29,7 @@ use App\Notifications\Application\RestartLimitReached as ApplicationRestartLimit
 use App\Notifications\Container\ContainerRestarted;
 use App\Services\ContainerStatusAggregator;
 use App\Services\RestartCountTracker;
+use App\Services\SentinelSnapshotStore;
 use App\Traits\CalculatesExcludedStatus;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
@@ -108,6 +108,8 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
 
     public Collection $serviceContainerRestartCounts;
 
+    public bool $fromLatestSnapshot = false;
+
     public bool $foundProxy = false;
 
     public bool $foundLogDrainContainer = false;
@@ -116,7 +118,7 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
 
     public function middleware(): array
     {
-        return [(new WithoutOverlapping('push-server-update-'.$this->server->uuid))->expireAfter(30)->dontRelease()];
+        return [(new WithoutOverlapping('push-server-update-'.$this->server->uuid))->shared()->expireAfter(30)->dontRelease()];
     }
 
     public function backoff(): int
@@ -124,8 +126,9 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
         return isDev() ? 1 : 3;
     }
 
-    public function __construct(public Server $server, public $data)
+    public function __construct(public Server $server, public $data, bool $fromLatestSnapshot = false)
     {
+        $this->fromLatestSnapshot = $fromLatestSnapshot;
         $this->containers = collect();
         $this->foundApplicationIds = collect();
         $this->foundDatabaseUuids = collect();
@@ -152,6 +155,11 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
 
     public function handle()
     {
+        // Older full-payload queue entries are superseded by accepted snapshots.
+        if (! $this->fromLatestSnapshot && app(SentinelSnapshotStore::class)->hasSnapshot($this->server)) {
+            return;
+        }
+
         // Defensive initialization for Collection properties to handle queue deserialization edge cases
         $this->serviceContainerStatuses ??= collect();
         $this->previewContainerRestartCounts ??= collect();
@@ -601,7 +609,7 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
             if ($application->stoppedAfterRestartLimit() && $containerStatuses->every(
                 fn (string $status): bool => str($status)->contains('exited')
             )) {
-                $application->update(['status' => 'exited']);
+                $this->updateApplicationStatusForServer($application, 'exited');
 
                 continue;
             }
@@ -619,9 +627,8 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
             if ($relevantStatuses->isEmpty()) {
                 $aggregatedStatus = $this->calculateExcludedStatusFromStrings($containerStatuses);
 
-                if ($aggregatedStatus && $application->status !== $aggregatedStatus) {
-                    $application->status = $aggregatedStatus;
-                    $application->save();
+                if ($aggregatedStatus) {
+                    $this->updateApplicationStatusForServer($application, $aggregatedStatus);
                 }
 
                 continue;
@@ -633,9 +640,8 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
             $aggregatedStatus = $aggregator->aggregateFromStrings($relevantStatuses, $maxRestartCount, preserveRestarting: true);
 
             // Update application status with aggregated result
-            if ($aggregatedStatus && $application->status !== $aggregatedStatus) {
-                $application->status = $aggregatedStatus;
-                $application->save();
+            if ($aggregatedStatus) {
+                $this->updateApplicationStatusForServer($application, $aggregatedStatus);
             }
         }
     }
@@ -919,9 +925,35 @@ class PushServerUpdateJob implements ShouldBeEncrypted, ShouldQueue, Silenced
 
     private function updateAdditionalServersStatus()
     {
-        $this->allApplicationsWithAdditionalServers->each(function ($application) {
-            ComplexStatusCheck::run($application);
-        });
+        if (! $this->isCompleteSnapshot()) {
+            return;
+        }
+
+        // Present applications are aggregated below using this server's snapshot.
+        // Only a complete snapshot can establish that a destination has exited.
+        foreach ($this->allApplicationsWithAdditionalServers as $application) {
+            if (! $this->applicationContainerStatuses->has($application->id)) {
+                $this->updateApplicationStatusForServer($application, 'exited');
+            }
+        }
+    }
+
+    private function updateApplicationStatusForServer(Application $application, string $status): void
+    {
+        $isPrimary = ! $application->additional_servers_count;
+        if (! $isPrimary) {
+            [$standaloneDockerIds, $swarmDockerIds] = $this->serverDestinationIds();
+            $isPrimary = ($application->destination_type === StandaloneDocker::class && $standaloneDockerIds->contains($application->destination_id))
+                || ($application->destination_type === SwarmDocker::class && $swarmDockerIds->contains($application->destination_id));
+        }
+
+        if ($isPrimary) {
+            if ($application->getRawOriginal('status') !== $status) {
+                $application->update(['status' => $status]);
+            }
+        } else {
+            $application->additional_servers()->updateExistingPivot($this->server->id, ['status' => $status]);
+        }
     }
 
     private function isRunning(string $containerStatus)

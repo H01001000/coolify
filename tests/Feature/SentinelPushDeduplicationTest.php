@@ -2,12 +2,15 @@
 
 use App\Events\SentinelSynchronized;
 use App\Http\Controllers\Api\SentinelController;
-use App\Jobs\PushServerUpdateJob;
+use App\Jobs\ProcessSentinelSnapshotJob;
 use App\Models\Server;
 use App\Models\User;
+use Illuminate\Bus\UniqueLock;
+use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
@@ -74,14 +77,14 @@ it('skips dispatch decision when sentinel lock acquisition times out', function 
 it('dispatches the job on the first push', function () use ($running) {
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('skips the job when the second push is identical', function () use ($running) {
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('does not audit successful sentinel pushes', function () use ($running) {
@@ -89,7 +92,7 @@ it('does not audit successful sentinel pushes', function () use ($running) {
 
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('updates the heartbeat even when the job is skipped', function () use ($running) {
@@ -99,7 +102,7 @@ it('updates the heartbeat even when the job is skipped', function () use ($runni
 
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
     expect(Carbon::parse($this->server->fresh()->sentinel_updated_at)->diffInSeconds(now()))->toBeLessThan(5);
 });
 
@@ -134,7 +137,7 @@ it('accepts an empty container list as a heartbeat when no containers are runnin
 
     pushSentinel($this->token, sentinelPayload([]))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
     expect(Carbon::parse($this->server->fresh()->sentinel_updated_at)->diffInSeconds(now()))->toBeLessThan(5);
 });
 
@@ -147,7 +150,7 @@ it('rejects malformed sentinel payloads before touching server state', function 
         ->assertJsonPath('message', 'Validation failed.')
         ->assertJsonValidationErrors('containers');
 
-    Queue::assertNotPushed(PushServerUpdateJob::class);
+    Queue::assertNotPushed(ProcessSentinelSnapshotJob::class);
     expect($this->server->fresh()->sentinel_updated_at)->toBe($originalHeartbeat);
     expect(Cache::has('sentinel:push-hash:'.$this->server->id))->toBeFalse();
     expect(Cache::has('sentinel:push-force:'.$this->server->id))->toBeFalse();
@@ -161,7 +164,7 @@ it('guards the dedupe decision with a server scoped atomic cache lock', function
 
     expect($controller)
         ->toContain('$lockKey = "sentinel:push-lock:{$server->id}";')
-        ->toContain('Cache::lock($lockKey, 10)->block(5, function () use ($hashKey, $forceKey, $hash): bool')
+        ->toContain('Cache::lock($lockKey, 10)->block(5, function () use ($server, $data, $hashKey, $forceKey, $hash): bool')
         ->toContain('Cache::put($hashKey, $hash, now()->addDay())')
         ->toContain("Cache::put(\$forceKey, true, config('constants.sentinel.push_force_interval_seconds', 300))");
 });
@@ -172,7 +175,7 @@ it('dispatches the job when container state changes', function () use ($running)
     $exited = [['name' => 'app-1', 'state' => 'exited', 'health_status' => 'unhealthy']];
     pushSentinel($this->token, sentinelPayload($exited))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 2);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('dispatches the job when only the container restart count changes', function () {
@@ -182,7 +185,7 @@ it('dispatches the job when only the container restart count changes', function 
     pushSentinel($this->token, sentinelPayload($beforeRestart))->assertOk();
     pushSentinel($this->token, sentinelPayload($afterRestart))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 2);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('ignores health status changes while container lifecycle state is unchanged', function () {
@@ -192,14 +195,14 @@ it('ignores health status changes while container lifecycle state is unchanged',
     pushSentinel($this->token, sentinelPayload($healthy))->assertOk();
     pushSentinel($this->token, sentinelPayload($unhealthy))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('ignores disk percentage changes (excluded from the hash)', function () use ($running) {
     pushSentinel($this->token, sentinelPayload($running(), diskPercentage: 42.0))->assertOk();
     pushSentinel($this->token, sentinelPayload($running(), diskPercentage: 88.0))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('ignores container reordering (hash is sorted by name)', function () {
@@ -215,24 +218,27 @@ it('ignores container reordering (hash is sorted by name)', function () {
     pushSentinel($this->token, sentinelPayload($order1))->assertOk();
     pushSentinel($this->token, sentinelPayload($order2))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 1);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
 it('force-dispatches an identical push after the force window expires', function () use ($running) {
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
+
+    // Simulate the queued wake-up beginning processing.
+    (new UniqueLock(Cache::store()))->release(Queue::pushed(ProcessSentinelSnapshotJob::class)->first());
 
     // Simulate the force key TTL elapsing.
     Cache::forget('sentinel:push-force:'.$this->server->id);
 
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 2);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 2);
 });
 
 it('rejects an invalid token without dispatching', function () use ($running) {
     pushSentinel('not-a-real-token', sentinelPayload($running()))->assertUnauthorized();
 
-    Queue::assertNotPushed(PushServerUpdateJob::class);
+    Queue::assertNotPushed(ProcessSentinelSnapshotJob::class);
 });
 
 it('dispatches a complete snapshot after an identical partial snapshot', function () use ($running) {
@@ -253,5 +259,15 @@ it('dispatches a complete snapshot after an identical partial snapshot', functio
     pushSentinel($this->token, $partialPayload)->assertOk();
     pushSentinel($this->token, $completePayload)->assertOk();
 
-    Queue::assertPushed(PushServerUpdateJob::class, 2);
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
+});
+
+it('recovers when enqueueing the wake-up fails', function () use ($running) {
+    $this->server->update(['sentinel_updated_at' => now()]);
+    $dispatcher = app(Dispatcher::class);
+    Bus::shouldReceive('dispatch')->once()->andThrow(new RuntimeException('simulated enqueue failure'));
+    pushSentinel($this->token, sentinelPayload($running()))->assertStatus(500);
+    Bus::swap($dispatcher);
+    pushSentinel($this->token, sentinelPayload($running()))->assertOk();
+    Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });

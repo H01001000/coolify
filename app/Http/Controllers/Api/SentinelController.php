@@ -4,8 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Events\SentinelSynchronized;
 use App\Http\Controllers\Controller;
-use App\Jobs\PushServerUpdateJob;
+use App\Jobs\ProcessSentinelSnapshotJob;
 use App\Models\Server;
+use App\Services\SentinelSnapshotStore;
 use Exception;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
@@ -19,7 +20,7 @@ class SentinelController extends Controller
      *
      * Sentinel pushes its full container list on a fixed interval (default 60s),
      * even when nothing changed. To avoid dispatching one PushServerUpdateJob per
-     * server per minute, the job is only dispatched when the container state hash
+     * server per minute, a lightweight wake-up is only enqueued when the container state hash
      * changes, or when the force window has elapsed.
      */
     public function push(Request $request)
@@ -103,15 +104,21 @@ class SentinelController extends Controller
             SentinelSynchronized::dispatch($server);
         }
 
-        if ($this->shouldDispatchUpdate($server, $data)) {
-            PushServerUpdateJob::dispatch($server, $data);
+        try {
+            if ($this->shouldDispatchUpdate($server, $data)) {
+                ProcessSentinelSnapshotJob::enqueue($server);
+            }
+        } catch (\Throwable $exception) {
+            Cache::forget('sentinel:push-hash:'.$server->id);
+            Cache::forget('sentinel:push-force:'.$server->id);
+            throw $exception;
         }
 
         return response()->json(['message' => 'ok'], 200);
     }
 
     /**
-     * Decide whether PushServerUpdateJob should be dispatched for this push.
+     * Publish the latest snapshot and decide whether to enqueue a wake-up.
      *
      * Dispatches when: first push (no cached hash), the container state changed,
      * or the force window elapsed.
@@ -124,7 +131,9 @@ class SentinelController extends Controller
         $lockKey = "sentinel:push-lock:{$server->id}";
 
         try {
-            return Cache::lock($lockKey, 10)->block(5, function () use ($hashKey, $forceKey, $hash): bool {
+            return Cache::lock($lockKey, 10)->block(5, function () use ($server, $data, $hashKey, $forceKey, $hash): bool {
+                // Publish under the same per-server lock, including suppressed pushes.
+                app(SentinelSnapshotStore::class)->put($server, $data);
                 $cachedHash = Cache::get($hashKey);
                 $forceActive = Cache::has($forceKey);
 
@@ -150,7 +159,7 @@ class SentinelController extends Controller
      * health_status are excluded on purpose. Disk % churns constantly, and
      * health checks can flap between starting/healthy/unhealthy while the
      * container lifecycle state remains unchanged. Both would otherwise defeat
-     * the hash and dispatch DB-heavy PushServerUpdateJob instances too often.
+     * the hash and dispatch DB-heavy status processors too often.
      * The snapshot completeness flag is included so a complete snapshot always
      * dispatches after a partial snapshot. Sorted by name so container ordering
      * from Sentinel does not affect the hash.
