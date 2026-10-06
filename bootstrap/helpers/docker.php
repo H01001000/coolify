@@ -1284,6 +1284,14 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
     $options = [];
     $compose_options = collect([]);
     preg_match_all('/(--\w+(?:-\w+)*)(?:\s|=)?([^\s-]+)?/', $custom_docker_run_options, $matches, PREG_SET_ORDER);
+    // Supplementary groups are repeatable, including named groups containing hyphens.
+    preg_match_all('/(?:^|\s)--group-add(?:=|\s+)(?:"([^"]+)"|\'([^\']+)\'|((?!--)[^\s]+))/', $custom_docker_run_options ?? '', $group_matches, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL);
+    foreach ($group_matches as $group_match) {
+        $options['--group-add'][] = $group_match[1] ?? $group_match[2] ?? $group_match[3];
+    }
+    if (isset($options['--group-add'])) {
+        $options['--group-add'] = array_values(array_unique($options['--group-add']));
+    }
     $list_options = collect([
         '--cap-add',
         '--cap-drop',
@@ -1293,6 +1301,7 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
         '--device',
         '--shm-size',
         '--dns',
+        '--group-add',
     ]);
     $mapping = collect([
         '--cap-add' => 'cap_add',
@@ -1307,12 +1316,16 @@ function convertDockerRunToCompose(?string $custom_docker_run_options = null)
         '--ip6' => 'ip6',
         '--shm-size' => 'shm_size',
         '--dns' => 'dns',
+        '--group-add' => 'group_add',
         '--gpus' => 'gpus',
         '--hostname' => 'hostname',
         '--entrypoint' => 'entrypoint',
     ]);
     foreach ($matches as $match) {
         $option = $match[1];
+        if ($option === '--group-add') {
+            continue;
+        }
         if ($option === '--gpus') {
             $regexForParsingDeviceIds = '/device=([0-9A-Za-z-,]+)/';
             preg_match($regexForParsingDeviceIds, $custom_docker_run_options, $device_matches);
