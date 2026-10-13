@@ -6,6 +6,7 @@ use App\Livewire\Project\Shared\Storages\All as StorageList;
 use App\Models\Application;
 use App\Models\LocalFileVolume;
 use App\Models\LocalPersistentVolume;
+use App\Services\FabricConfiguration;
 use App\Support\ValidationPatterns;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Livewire\Component;
@@ -247,7 +248,7 @@ class Storage extends Component
 
             $fs_path = confineFileMountPath($this->fileStorageHostPath(), $this->file_storage_path, 'file storage path');
 
-            LocalFileVolume::create([
+            $fileStorage = LocalFileVolume::create([
                 'fs_path' => $fs_path,
                 'mount_path' => $this->file_storage_path,
                 'content' => $this->file_storage_content,
@@ -260,7 +261,10 @@ class Storage extends Component
             $this->activeTab = 'files';
             $this->refreshStorages();
             $this->dispatch('configurationChanged');
-            $this->dispatch('success', 'File mount added successfully');
+            $message = app(FabricConfiguration::class)->supports($fileStorage)
+                ? 'File mount added. Synchronization to configured servers is queued.'
+                : 'File mount added successfully';
+            $this->dispatch('success', $message);
             $this->dispatch('closeStorageModal', 'file');
         } catch (\Throwable $e) {
             return handleError($e, $this);

@@ -17,8 +17,10 @@ use App\Models\StandalonePostgresql;
 use App\Models\Team;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Livewire\Livewire;
 
@@ -253,3 +255,97 @@ test('deleting a volume mount refreshes the configuration warning', function () 
 
     expect($volume->fresh())->toBeNull();
 });
+
+test('Fabric creation queues a verified fan-out rather than claiming remote completion', function () {
+    config(['fabric.configuration_enabled' => true]);
+    $this->application->build_pack = 'dockerfile';
+    $this->application->save();
+
+    Livewire::test(Storage::class, ['resource' => $this->application])
+        ->set('file_storage_path', '/app/config.json')
+        ->set('file_storage_content', '0')
+        ->call('submitFileStorage')
+        ->assertDispatched('success', 'File mount added. Synchronization to configured servers is queued.');
+
+    $file = $this->application->fileStorages()->first();
+    expect($file->content)->toBe('0');
+    Bus::assertDispatched(ServerStorageSaveJob::class, fn ($job) => $job->localFileVolume->id === $file->id);
+});
+
+test('Fabric editor retains desired content when an agent reports failure', function () {
+    config([
+        'fabric.configuration_enabled' => true,
+        'fabric.nodes_json' => json_encode([
+            (string) $this->server->id => ['endpoint' => 'https://agent.test', 'token' => str_repeat('t', 32)],
+        ]),
+    ]);
+    $this->application->build_pack = 'dockerfile';
+    $this->application->save();
+    $file = LocalFileVolume::create([
+        'fs_path' => $this->application->workdir().'/app/config.json',
+        'mount_path' => '/app/config.json',
+        'content' => 'old',
+        'is_directory' => false,
+        'resource_id' => $this->application->id,
+        'resource_type' => $this->application->getMorphClass(),
+    ]);
+    Http::fake([
+        '*' => Http::response([
+            'applied' => false,
+            'files' => [['path' => $file->fs_path, 'applied' => false, 'code' => 'path_conflict']],
+        ], 207),
+    ]);
+
+    Livewire::test(FileStorage::class, ['fileStorage' => $file->fresh(), 'resource' => $this->application])
+        ->set('content', 'new desired content')
+        ->call('submit')
+        ->assertDispatched('error');
+
+    expect($file->fresh()->content)->toBe('new desired content');
+});
+
+test('Fabric API content updates return verified completion or per-server failure', function (bool $fail) {
+    config([
+        'fabric.configuration_enabled' => true,
+        'fabric.nodes_json' => json_encode([
+            (string) $this->server->id => ['endpoint' => 'https://agent.test', 'token' => str_repeat('t', 32)],
+        ]),
+    ]);
+    $this->application->build_pack = 'dockerfile';
+    $this->application->save();
+    $file = LocalFileVolume::create([
+        'fs_path' => $this->application->workdir().'/app/config.json',
+        'mount_path' => '/app/config.json',
+        'content' => 'old',
+        'is_directory' => false,
+        'resource_id' => $this->application->id,
+        'resource_type' => $this->application->getMorphClass(),
+    ]);
+    Http::fake(function ($request) use ($fail) {
+        $spec = $request['files'][0];
+
+        return Http::response([
+            'applied' => ! $fail,
+            'files' => [[
+                'path' => $spec['path'],
+                'applied' => ! $fail,
+                'sha256' => hash('sha256', $spec['content']),
+                'code' => $fail ? 'permission_denied' : null,
+            ]],
+        ], $fail ? 207 : 200);
+    });
+    $token = $this->admin->createToken('fabric-api-test', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $response = $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'id' => $file->id, 'content' => '0',
+        ]);
+    if ($fail) {
+        $response->assertStatus(502)->assertJsonPath('saved', true)
+            ->assertJsonPath('synchronized', false)
+            ->assertJsonPath('servers.'.$this->server->id.'.code', 'permission_denied');
+    } else {
+        $response->assertOk()->assertHeader('X-Fabric-File-Mount-Refresh', 'redeploy-required');
+    }
+    expect($file->fresh()->content)->toBe('0');
+})->with([false, true]);

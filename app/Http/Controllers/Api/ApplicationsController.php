@@ -6,6 +6,7 @@ use App\Actions\Application\CleanupPreviewDeployment;
 use App\Actions\Application\LoadComposeFile;
 use App\Actions\Application\StopApplication;
 use App\Enums\BuildPackTypes;
+use App\Exceptions\FabricConfigurationSyncException;
 use App\Http\Controllers\Controller;
 use App\Jobs\DeleteResourceJob;
 use App\Models\Application;
@@ -23,6 +24,7 @@ use App\Rules\DockerImageFormat;
 use App\Rules\ValidGitBranch;
 use App\Rules\ValidGitRepositoryUrl;
 use App\Services\DockerImageParser;
+use App\Services\FabricConfiguration;
 use App\Support\DomainPortOverrides;
 use App\Support\ValidationPatterns;
 use Illuminate\Http\JsonResponse;
@@ -5109,7 +5111,33 @@ class ApplicationsController extends Controller
             'mount_path' => $storage->mount_path ?? null,
         ]);
 
-        return response()->json($this->exposeFileStorageContentIfAllowed($storage));
+        $synchronized = null;
+        if ($storage instanceof LocalFileVolume && $request->has('content')
+            && app(FabricConfiguration::class)->supports($storage)) {
+            try {
+                $synchronized = $storage->saveStorageOnServer();
+            } catch (FabricConfigurationSyncException $e) {
+                return response()->json([
+                    'message' => $e->getMessage(),
+                    'saved' => true,
+                    'synchronized' => false,
+                    'servers' => $e->results,
+                ], 502);
+            } catch (\RuntimeException $e) {
+                return response()->json([
+                    'message' => $e->getMessage(),
+                    'saved' => true,
+                    'synchronized' => false,
+                ], 502);
+            }
+        }
+
+        $response = response()->json($this->exposeFileStorageContentIfAllowed($storage));
+        if ($synchronized !== null) {
+            $response->header('X-Fabric-File-Mount-Refresh', 'redeploy-required');
+        }
+
+        return $response;
     }
 
     #[OA\Post(

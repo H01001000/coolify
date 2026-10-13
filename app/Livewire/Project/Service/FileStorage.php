@@ -15,6 +15,7 @@ use App\Models\StandaloneMongodb;
 use App\Models\StandaloneMysql;
 use App\Models\StandalonePostgresql;
 use App\Models\StandaloneRedis;
+use App\Services\FabricConfiguration;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Livewire\Attributes\On;
 use Livewire\Attributes\Validate;
@@ -276,10 +277,17 @@ class FileStorage extends Component
             $this->fileStorage->is_preview_suffix_enabled = $this->isPreviewSuffixEnabled;
             $this->fileStorage->save();
             $this->fileStorage->saveStorageOnServer();
-            $this->dispatch('success', 'File updated.');
+            $message = app(FabricConfiguration::class)->supports($this->fileStorage)
+                ? 'File synchronized on all configured servers. Redeploy to refresh existing file mounts.'
+                : 'File updated.';
+            $this->dispatch('success', $message);
         } catch (\Throwable $e) {
-            $this->fileStorage->setRawAttributes($original);
-            $this->fileStorage->save();
+            // Fabric may have applied some nodes. Keep the desired database content
+            // so another Save retries the same configuration on every node.
+            if (! app(FabricConfiguration::class)->supports($this->fileStorage)) {
+                $this->fileStorage->setRawAttributes($original);
+                $this->fileStorage->save();
+            }
             $this->syncData();
 
             return handleError($e, $this);

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Events\FileStorageChanged;
 use App\Jobs\ServerStorageSaveJob;
+use App\Services\FabricConfiguration;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
@@ -227,6 +228,11 @@ class LocalFileVolume extends BaseModel
     {
         if ($this->is_host_file) {
             return;
+        }
+
+        $fabric = app(FabricConfiguration::class);
+        if ($fabric->supports($this)) {
+            return $fabric->save($this);
         }
 
         $this->load(['service']);
