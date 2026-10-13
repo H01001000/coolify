@@ -229,7 +229,7 @@ trait ExecuteRemoteCommand
                 if (empty($error)) {
                     $error = $process_result->output() ?: 'Command failed with no error output';
                 }
-                $redactedCommand = $this->redact_sensitive_info($command);
+                $redactedCommand = $skip_command_log ? '[sensitive command]' : $this->redact_sensitive_info($command);
                 throw new DeploymentException("Command execution failed (exit code {$process_result->exitCode()}): {$redactedCommand}\nError: {$error}");
             }
         }

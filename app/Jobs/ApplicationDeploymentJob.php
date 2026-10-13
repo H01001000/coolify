@@ -731,6 +731,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
         $this->execute_remote_command([
             executeInDocker($this->deployment_uuid, "echo '{$this->docker_compose_base64}' | base64 -d | tee {$this->workdir}{$this->docker_compose_location} > /dev/null"),
             'hidden' => true,
+            'skip_command_log' => true,
+            'hidden' => true,
         ]);
 
         // Modify Dockerfiles for ARGs and build secrets
@@ -1113,6 +1115,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                 ],
                 [
                     "echo '{$this->docker_compose_base64}' | base64 -d | tee $composeFileName > /dev/null",
+                    'hidden' => true,
+                    'skip_command_log' => true,
                 ],
                 [
                     "echo '{$readme}' > $mainDir/README.md",
@@ -1614,6 +1618,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
         $this->execute_remote_command(
             [
                 executeInDocker($this->deployment_uuid, "echo '$envs_base64' | base64 -d | tee $this->workdir/.env > /dev/null"),
+                'hidden' => true,
+                'skip_command_log' => true,
             ]
         );
 
@@ -1632,6 +1638,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             $this->execute_remote_command(
                 [
                     "echo '$envs_base64' | base64 -d | tee $this->configuration_dir/.env > /dev/null",
+                    'hidden' => true,
+                    'skip_command_log' => true,
                 ]
             );
             $this->server = $this->build_server;
@@ -1639,6 +1647,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             $this->execute_remote_command(
                 [
                     "echo '$envs_base64' | base64 -d | tee $this->configuration_dir/.env > /dev/null",
+                    'hidden' => true,
+                    'skip_command_log' => true,
                 ]
             );
         }
@@ -1948,6 +1958,8 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                 $this->application_deployment_queue->addLogEntry('Creating build-time .env file in /artifacts (outside Docker context).', hidden: true);
                 $this->execute_remote_command([
                     executeInDocker($this->deployment_uuid, "echo '$envs_base64' | base64 -d | tee ".self::BUILD_TIME_ENV_PATH.' > /dev/null'),
+                    'hidden' => true,
+                    'skip_command_log' => true,
                 ]);
 
                 if (isDev()) {
@@ -3601,7 +3613,7 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
 
         $this->docker_compose = Yaml::dump($docker_compose, 10);
         $this->docker_compose_base64 = base64_encode($this->docker_compose);
-        $this->execute_remote_command([executeInDocker($this->deployment_uuid, "echo '{$this->docker_compose_base64}' | base64 -d | tee {$this->workdir}/docker-compose.yaml > /dev/null"), 'hidden' => true]);
+        $this->execute_remote_command([executeInDocker($this->deployment_uuid, "echo '{$this->docker_compose_base64}' | base64 -d | tee {$this->workdir}/docker-compose.yaml > /dev/null"), 'hidden' => true, 'skip_command_log' => true]);
     }
 
     private function generate_local_persistent_volumes()
