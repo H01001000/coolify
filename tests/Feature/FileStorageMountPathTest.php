@@ -256,9 +256,9 @@ test('deleting a volume mount refreshes the configuration warning', function () 
     expect($volume->fresh())->toBeNull();
 });
 
-test('Fabric creation queues a verified fan-out rather than claiming remote completion', function () {
+test('Fabric creation queues a verified fan-out rather than claiming remote completion', function (string $buildPack) {
     config(['fabric.configuration_enabled' => true]);
-    $this->application->build_pack = 'dockerfile';
+    $this->application->build_pack = $buildPack;
     $this->application->save();
 
     Livewire::test(Storage::class, ['resource' => $this->application])
@@ -270,16 +270,16 @@ test('Fabric creation queues a verified fan-out rather than claiming remote comp
     $file = $this->application->fileStorages()->first();
     expect($file->content)->toBe('0');
     Bus::assertDispatched(ServerStorageSaveJob::class, fn ($job) => $job->localFileVolume->id === $file->id);
-});
+})->with(['dockerfile', 'dockerimage']);
 
-test('Fabric editor retains desired content when an agent reports failure', function () {
+test('Fabric editor retains desired content when an agent reports failure', function (string $buildPack) {
     config([
         'fabric.configuration_enabled' => true,
         'fabric.nodes_json' => json_encode([
             (string) $this->server->id => ['endpoint' => 'https://agent.test', 'token' => str_repeat('t', 32)],
         ]),
     ]);
-    $this->application->build_pack = 'dockerfile';
+    $this->application->build_pack = $buildPack;
     $this->application->save();
     $file = LocalFileVolume::create([
         'fs_path' => $this->application->workdir().'/app/config.json',
@@ -302,16 +302,16 @@ test('Fabric editor retains desired content when an agent reports failure', func
         ->assertDispatched('error');
 
     expect($file->fresh()->content)->toBe('new desired content');
-});
+})->with(['dockerfile', 'dockerimage']);
 
-test('Fabric API content updates return verified completion or per-server failure', function (bool $fail) {
+test('Fabric API content updates return verified completion or per-server failure', function (bool $fail, string $buildPack) {
     config([
         'fabric.configuration_enabled' => true,
         'fabric.nodes_json' => json_encode([
             (string) $this->server->id => ['endpoint' => 'https://agent.test', 'token' => str_repeat('t', 32)],
         ]),
     ]);
-    $this->application->build_pack = 'dockerfile';
+    $this->application->build_pack = $buildPack;
     $this->application->save();
     $file = LocalFileVolume::create([
         'fs_path' => $this->application->workdir().'/app/config.json',
@@ -348,4 +348,4 @@ test('Fabric API content updates return verified completion or per-server failur
         $response->assertOk()->assertHeader('X-Fabric-File-Mount-Refresh', 'redeploy-required');
     }
     expect($file->fresh()->content)->toBe('0');
-})->with([false, true]);
+})->with([false, true])->with(['dockerfile', 'dockerimage']);

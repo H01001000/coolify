@@ -64,7 +64,8 @@ function fabricReceipt(Request $request, bool $applied = true, ?string $digest =
     ];
 }
 
-it('fans out once per unique server and verifies receipts', function () {
+it('fans out once per unique server and verifies receipts', function (string $buildPack) {
+    $this->application->build_pack = $buildPack;
     Http::fake(fn (Request $request) => Http::response(fabricReceipt($request)));
     $results = $this->storage->saveStorageOnServer();
 
@@ -75,14 +76,15 @@ it('fans out once per unique server and verifies receipts', function () {
         && $request->hasHeader('Authorization', 'Bearer '.str_repeat('b', 32))
         && $request['service_id'] === 'configuration-test'
         && $request['files'][0]['content'] === 'desired content');
-});
+})->with(['dockerfile', 'dockerimage']);
 
-it('sends empty and zero content without substituting touch', function (string $content) {
+it('sends empty and zero content without substituting touch', function (string $content, string $buildPack) {
+    $this->application->build_pack = $buildPack;
     $this->storage->content = $content;
     Http::fake(fn (Request $request) => Http::response(fabricReceipt($request)));
     $this->fabric->save($this->storage);
     Http::assertSent(fn (Request $request) => $request['files'][0]['content'] === $content);
-})->with(['', '0']);
+})->with(['', '0'])->with(['dockerfile', 'dockerimage']);
 
 it('continues to other servers and reports partial failure without exposing content', function () {
     Http::fake(fn (Request $request) => Http::response(
@@ -112,7 +114,8 @@ it('validates all destination configuration before sending any content', functio
     Http::assertNothingSent();
 });
 
-it('does not opt in external files, directories, Git files or unrelated build packs', function () {
+it('does not opt in external files, directories, Git files or unrelated build packs', function (string $buildPack) {
+    $this->application->build_pack = $buildPack;
     expect($this->fabric->supports($this->storage))->toBeTrue();
     foreach (['is_host_file', 'is_directory', 'is_based_on_git'] as $flag) {
         $this->storage->$flag = true;
@@ -124,7 +127,7 @@ it('does not opt in external files, directories, Git files or unrelated build pa
     $this->application->build_pack = 'dockerfile';
     config(['fabric.configuration_enabled' => false]);
     expect($this->fabric->supports($this->storage))->toBeFalse();
-});
+})->with(['dockerfile', 'dockerimage']);
 
 it('rejects plaintext endpoints by default', function () {
     config(['fabric.nodes_json' => json_encode(['1' => ['endpoint' => 'http://node-one.test', 'token' => str_repeat('a', 32)]])]);

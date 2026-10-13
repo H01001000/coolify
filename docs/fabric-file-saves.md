@@ -1,7 +1,8 @@
 # Fabric-backed managed file saves
 
 This opt-in integration applies to editable, regular managed files on Dockerfile
-applications (including inline Dockerfiles). Coolify remains authoritative for
+applications (including inline Dockerfiles) and Docker Image applications.
+Coolify remains authoritative for
 file contents. Fabric only executes synchronous, authenticated node-local RPCs.
 
 No migrations or per-server UI fields are required for this first integration.

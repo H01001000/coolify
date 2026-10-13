@@ -21,7 +21,7 @@ class FabricConfiguration
             && ! $storage->is_directory
             && ! $storage->is_based_on_git
             && $storage->resource instanceof Application
-            && ($storage->resource->build_pack === 'dockerfile' || filled($storage->resource->dockerfile));
+            && (in_array($storage->resource->build_pack, ['dockerfile', 'dockerimage'], true) || filled($storage->resource->dockerfile));
     }
 
     public function save(LocalFileVolume $storage): array
