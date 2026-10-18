@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Validation\ValidationException;
 use Symfony\Component\Yaml\Yaml;
 
 class LocalFileVolume extends BaseModel
@@ -25,6 +26,7 @@ class LocalFileVolume extends BaseModel
         'content' => 'encrypted',
         'is_directory' => 'boolean',
         'is_host_file' => 'boolean',
+        'is_template' => 'boolean',
         'is_preview_suffix_enabled' => 'boolean',
     ];
 
@@ -42,6 +44,7 @@ class LocalFileVolume extends BaseModel
         'resource_id',
         'is_directory',
         'is_host_file',
+        'is_template',
         'chown',
         'chmod',
         'is_based_on_git',
@@ -52,6 +55,13 @@ class LocalFileVolume extends BaseModel
 
     protected static function booted()
     {
+        static::saving(function (LocalFileVolume $storage) {
+            if ($storage->is_template && ! app(FabricConfiguration::class)->supports($storage)) {
+                throw ValidationException::withMessages([
+                    'is_template' => 'Templates require Fabric and a managed Dockerfile or Docker Image file. Host files, directories and Git-managed files cannot be templates.',
+                ]);
+            }
+        });
         static::created(function (LocalFileVolume $fileVolume) {
             if ($fileVolume->is_host_file) {
                 return;
@@ -106,6 +116,10 @@ class LocalFileVolume extends BaseModel
 
     public function loadStorageOnServer()
     {
+        if ($this->is_template) {
+            throw new \RuntimeException('Loading a rendered file would replace the stored template.');
+        }
+
         if ($this->is_host_file) {
             return;
         }
@@ -231,6 +245,9 @@ class LocalFileVolume extends BaseModel
         }
 
         $fabric = app(FabricConfiguration::class);
+        if ($this->is_template && ! $fabric->supports($this)) {
+            throw new \RuntimeException('Templated files require Fabric; literal SSH fallback is disabled.');
+        }
         if ($fabric->supports($this)) {
             return $fabric->save($this);
         }

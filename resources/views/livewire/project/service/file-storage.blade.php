@@ -89,7 +89,7 @@
                                     shortConfirmationLabel="Filepath" :confirmWithPassword="false"
                                     step2ButtonText="Convert to directory" />
                             @endif
-                            <x-forms.button type="button" wire:click="loadStorageOnServer">Load from
+                            <x-forms.button type="button" wire:click="loadStorageOnServer" :disabled="$isTemplate">Load from
                                 server</x-forms.button>
                             <x-modal-confirmation :ignoreWire="false" title="Confirm File Deletion?" buttonTitle="Delete"
                                 isErrorButton submitAction="delete" :checkboxes="$fileDeletionCheckboxes" :actions="['The selected file will be permanently deleted from the container.']"
@@ -107,6 +107,10 @@
                                     id="isBasedOnGit"></x-forms.checkbox>
                             </div>
                         @endif
+                        @if (app(\App\Services\FabricConfiguration::class)->supports($fileStorage))
+                            <x-forms.checkbox label="Render as a per-server template" id="isTemplate"
+                                helper="Fabric renders Go templates separately for every destination. Save validates every server before writing." />
+                        @endif
                         <x-forms.textarea
                             label="{{ $fileStorage->is_based_on_git ? 'Content (refreshed after a successful deployment)' : 'Content' }}"
                             helper="The content shown may be outdated. Click 'Load from server' to fetch the latest version."
@@ -119,6 +123,7 @@
                                     id="isBasedOnGit"></x-forms.checkbox>
                             </div>
                         @endif
+
                         <x-forms.textarea
                             label="{{ $fileStorage->is_based_on_git ? 'Content (refreshed after a successful deployment)' : 'Content' }}"
                             helper="The content shown may be outdated. Click 'Load from server' to fetch the latest version."
@@ -130,7 +135,7 @@
                 @if (!$fileStorage->is_directory && !$fileStorage->is_host_file)
                     @can('update', $resource)
                         <div class="flex gap-2">
-                            <x-forms.button type="button" wire:click="loadStorageOnServer">Load from
+                            <x-forms.button type="button" wire:click="loadStorageOnServer" :disabled="$isTemplate">Load from
                                 server</x-forms.button>
                         </div>
                     @endcan

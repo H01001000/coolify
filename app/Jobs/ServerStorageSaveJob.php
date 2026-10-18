@@ -22,7 +22,7 @@ class ServerStorageSaveJob implements ShouldBeEncrypted, ShouldQueue
         $this->onQueue('high');
         if (app(FabricConfiguration::class)->supports($localFileVolume)) {
             $count = $localFileVolume->resource->additional_servers->unique('id')->count() + 1;
-            $this->timeout = max(60, (int) ceil($count / 8) * (int) config('fabric.timeout', 30) + 15);
+            $this->timeout = max(60, (int) ceil($count / 8) * ($localFileVolume->is_template ? 2 : 1) * (int) config('fabric.timeout', 30) + 15);
         }
     }
 

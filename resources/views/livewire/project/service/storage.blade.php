@@ -195,6 +195,10 @@
                                                         label="Destination Path" required
                                                         x-on:input="filePath = $event.target.value"
                                                         helper="File location inside the container" />
+                                                    @if (config('fabric.configuration_enabled') && $resource instanceof \App\Models\Application && (in_array($resource->build_pack, ['dockerfile', 'dockerimage'], true) || filled($resource->dockerfile)))
+                                                        <x-forms.checkbox canGate="update" :canResource="$resource" id="file_storage_is_template"
+                                                            label="Render as a per-server template" helper="Fabric renders Go templates separately for every destination." />
+                                                    @endif
                                                     <x-forms.textarea canGate="update" :canResource="$resource" label="Content"
                                                         id="file_storage_content"></x-forms.textarea>
                                                     <div class="flex justify-end pt-2">

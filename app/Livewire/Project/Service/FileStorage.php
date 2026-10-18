@@ -47,6 +47,8 @@ class FileStorage extends Component
     #[Validate(['required', 'boolean'])]
     public bool $isBasedOnGit = false;
 
+    public bool $isTemplate = false;
+
     #[Validate(['required', 'boolean'])]
     public bool $isPreviewSuffixEnabled = true;
 
@@ -56,6 +58,7 @@ class FileStorage extends Component
         'fileStorage.mount_path' => 'required',
         'content' => 'nullable',
         'isBasedOnGit' => 'required|boolean',
+        'isTemplate' => 'required|boolean',
         'isPreviewSuffixEnabled' => 'required|boolean',
     ];
 
@@ -131,6 +134,7 @@ class FileStorage extends Component
 
             // Sync to model
             $this->fileStorage->content = $this->content;
+            $this->fileStorage->is_template = $this->isTemplate;
             $this->fileStorage->is_based_on_git = $this->isBasedOnGit;
             $this->fileStorage->is_preview_suffix_enabled = $this->isPreviewSuffixEnabled;
 
@@ -139,6 +143,7 @@ class FileStorage extends Component
             // Sync from model
             $this->content = $this->fileStorage->content;
             $this->isBasedOnGit = $this->fileStorage->is_based_on_git;
+            $this->isTemplate = $this->fileStorage->is_template ?? false;
             $this->isPreviewSuffixEnabled = $this->fileStorage->is_preview_suffix_enabled ?? true;
         }
     }
@@ -147,6 +152,9 @@ class FileStorage extends Component
     {
         try {
             $this->authorize('update', $this->resource);
+            if ($this->fileStorage->is_template) {
+                throw new \RuntimeException('Disable template mode before converting this file.');
+            }
 
             if ($this->fileStorage->is_host_file) {
                 throw new \Exception('Host file mounts are bind-only and cannot be converted.');
@@ -273,6 +281,7 @@ class FileStorage extends Component
             }
             // Sync component properties to model
             $this->fileStorage->content = $this->content;
+            $this->fileStorage->is_template = $this->isTemplate;
             $this->fileStorage->is_based_on_git = $this->isBasedOnGit;
             $this->fileStorage->is_preview_suffix_enabled = $this->isPreviewSuffixEnabled;
             $this->fileStorage->save();

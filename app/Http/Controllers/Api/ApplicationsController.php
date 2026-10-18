@@ -4946,6 +4946,7 @@ class ApplicationsController extends Controller
                             'name' => ['type' => 'string', 'description' => 'The volume name (persistent only, not allowed for read-only storages).'],
                             'mount_path' => ['type' => 'string', 'description' => 'The container mount path (not allowed for read-only storages).'],
                             'content' => ['type' => 'string', 'nullable' => true, 'description' => 'The file content (file only, not allowed for read-only storages).'],
+                            'is_template' => ['type' => 'boolean', 'description' => 'Render separately on each destination using Fabric Go templates.'],
                         ],
                         additionalProperties: false,
                     ),
@@ -5007,9 +5008,10 @@ class ApplicationsController extends Controller
             'name' => ['string', 'regex:'.ValidationPatterns::VOLUME_NAME_PATTERN],
             'mount_path' => 'string',
             'content' => 'string|nullable',
+            'is_template' => 'boolean',
         ]);
 
-        $allAllowedFields = ['uuid', 'id', 'type', 'is_preview_suffix_enabled', 'name', 'mount_path', 'content'];
+        $allAllowedFields = ['uuid', 'id', 'type', 'is_preview_suffix_enabled', 'name', 'mount_path', 'content', 'is_template'];
         $extraFields = array_diff(array_keys($request->all()), $allAllowedFields);
         if ($validator->fails() || ! empty($extraFields)) {
             $errors = $validator->errors();
@@ -5051,7 +5053,7 @@ class ApplicationsController extends Controller
         }
 
         $isReadOnly = $storage->shouldBeReadOnlyInUI();
-        $editableOnlyFields = ['name', 'mount_path', 'content'];
+        $editableOnlyFields = ['name', 'mount_path', 'content', 'is_template'];
         $requestedEditableFields = array_intersect($editableOnlyFields, array_keys($request->all()));
 
         if ($isReadOnly && ! empty($requestedEditableFields)) {
@@ -5064,7 +5066,7 @@ class ApplicationsController extends Controller
         // Reject fields that don't apply to the given storage type
         if (! $isReadOnly) {
             $typeSpecificInvalidFields = $request->type === 'persistent'
-                ? array_intersect(['content'], array_keys($request->all()))
+                ? array_intersect(['content', 'is_template'], array_keys($request->all()))
                 : array_intersect(['name', 'host_path'], array_keys($request->all()));
 
             if (! empty($typeSpecificInvalidFields)) {
@@ -5094,6 +5096,9 @@ class ApplicationsController extends Controller
                 if ($request->has('mount_path')) {
                     $storage->mount_path = $request->mount_path;
                 }
+                if ($request->has('is_template')) {
+                    $storage->is_template = $request->boolean('is_template');
+                }
                 if ($request->has('content')) {
                     $storage->content = $request->content;
                 }
@@ -5112,7 +5117,7 @@ class ApplicationsController extends Controller
         ]);
 
         $synchronized = null;
-        if ($storage instanceof LocalFileVolume && $request->has('content')
+        if ($storage instanceof LocalFileVolume && ($request->has('content') || $request->has('is_template'))
             && app(FabricConfiguration::class)->supports($storage)) {
             try {
                 $synchronized = $storage->saveStorageOnServer();
@@ -5171,6 +5176,7 @@ class ApplicationsController extends Controller
                             'name' => ['type' => 'string', 'description' => 'Volume name (persistent only, required for persistent).'],
                             'mount_path' => ['type' => 'string', 'description' => 'The container mount path.'],
                             'content' => ['type' => 'string', 'nullable' => true, 'description' => 'File content (file only, optional).'],
+                            'is_template' => ['type' => 'boolean', 'description' => 'Render separately on each destination using Fabric Go templates.'],
                             'is_directory' => ['type' => 'boolean', 'description' => 'Whether this is a directory mount (file only, default false).'],
                             'fs_path' => ['type' => 'string', 'description' => 'Host directory path (required when is_directory is true).'],
                         ],
@@ -5215,12 +5221,13 @@ class ApplicationsController extends Controller
             'name' => ['string', 'regex:'.ValidationPatterns::VOLUME_NAME_PATTERN],
             'mount_path' => 'required|string',
             'content' => 'string|nullable',
+            'is_template' => 'boolean',
             'is_directory' => 'boolean',
             'is_host_file' => 'boolean',
             'fs_path' => 'string',
         ]);
 
-        $allAllowedFields = ['type', 'name', 'mount_path', 'content', 'is_directory', 'is_host_file', 'fs_path'];
+        $allAllowedFields = ['type', 'name', 'mount_path', 'content', 'is_directory', 'is_host_file', 'fs_path', 'is_template'];
         $extraFields = array_diff(array_keys($request->all()), $allAllowedFields);
         if ($validator->fails() || ! empty($extraFields)) {
             $errors = $validator->errors();
@@ -5244,7 +5251,7 @@ class ApplicationsController extends Controller
                 ], 422);
             }
 
-            $typeSpecificInvalidFields = array_intersect(['content', 'is_directory', 'is_host_file', 'fs_path'], array_keys($request->all()));
+            $typeSpecificInvalidFields = array_intersect(['content', 'is_directory', 'is_host_file', 'fs_path', 'is_template'], array_keys($request->all()));
             if (! empty($typeSpecificInvalidFields)) {
                 return response()->json([
                     'message' => 'Validation failed.',
@@ -5275,6 +5282,9 @@ class ApplicationsController extends Controller
 
         $isDirectory = $request->boolean('is_directory', false);
         $isHostFile = $request->boolean('is_host_file', false);
+        if ($request->boolean('is_template') && ($isDirectory || $isHostFile)) {
+            return response()->json(['message' => 'Templates require a managed regular file.'], 422);
+        }
 
         if ($isDirectory && $isHostFile) {
             return response()->json([
@@ -5353,6 +5363,7 @@ class ApplicationsController extends Controller
                 'fs_path' => $fsPath,
                 'mount_path' => $mountPath,
                 'content' => $request->content,
+                'is_template' => $request->boolean('is_template'),
                 'is_directory' => false,
                 'resource_id' => $application->id,
                 'resource_type' => get_class($application),

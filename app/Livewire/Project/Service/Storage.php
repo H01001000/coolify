@@ -31,6 +31,8 @@ class Storage extends Component
 
     public ?string $file_storage_content = null;
 
+    public bool $file_storage_is_template = false;
+
     public string $host_file_storage_source = '';
 
     public string $host_file_storage_destination = '';
@@ -242,6 +244,7 @@ class Storage extends Component
             $this->validate([
                 'file_storage_path' => 'required|string',
                 'file_storage_content' => 'nullable|string',
+                'file_storage_is_template' => 'boolean',
             ]);
 
             $this->file_storage_path = validateFileMountPath($this->file_storage_path, 'file storage path');
@@ -252,6 +255,7 @@ class Storage extends Component
                 'fs_path' => $fs_path,
                 'mount_path' => $this->file_storage_path,
                 'content' => $this->file_storage_content,
+                'is_template' => $this->file_storage_is_template,
                 'is_directory' => false,
                 'resource_id' => $this->resource->id,
                 'resource_type' => get_class($this->resource),
@@ -350,6 +354,7 @@ class Storage extends Component
         $this->host_path = null;
         $this->file_storage_path = '';
         $this->file_storage_content = null;
+        $this->file_storage_is_template = false;
         $this->file_storage_directory_destination = '';
         $this->host_file_storage_source = '';
         $this->host_file_storage_destination = '';

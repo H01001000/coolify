@@ -7,11 +7,13 @@ use App\Livewire\Project\Shared\Storages\All;
 use App\Livewire\Project\Shared\Storages\Show;
 use App\Models\Application;
 use App\Models\Environment;
+use App\Models\EnvironmentVariable;
 use App\Models\InstanceSettings;
 use App\Models\LocalFileVolume;
 use App\Models\LocalPersistentVolume;
 use App\Models\Project;
 use App\Models\Server;
+use App\Models\SharedEnvironmentVariable;
 use App\Models\StandaloneDocker;
 use App\Models\StandalonePostgresql;
 use App\Models\Team;
@@ -349,3 +351,122 @@ test('Fabric API content updates return verified completion or per-server failur
     }
     expect($file->fresh()->content)->toBe('0');
 })->with([false, true])->with(['dockerfile', 'dockerimage']);
+
+test('Fabric template creation retains encrypted source and queues rendering', function (string $buildPack) {
+    config(['fabric.configuration_enabled' => true]);
+    $this->application->update(['build_pack' => $buildPack]);
+    $source = '{{range .env}}{{.key}}={{.value}}{{end}}';
+    Livewire::test(Storage::class, ['resource' => $this->application])
+        ->set('file_storage_path', '/app/config.txt')
+        ->set('file_storage_content', $source)
+        ->set('file_storage_is_template', true)
+        ->call('submitFileStorage')
+        ->assertDispatched('success');
+    $file = $this->application->fileStorages()->first();
+    expect($file->is_template)->toBeTrue()->and($file->content)->toBe($source);
+    expect(DB::table('local_file_volumes')->where('id', $file->id)->value('content'))->not->toBe($source);
+    Bus::assertDispatched(ServerStorageSaveJob::class);
+    Livewire::test(FileStorage::class, ['fileStorage' => $file, 'resource' => $this->application])
+        ->assertSet('isTemplate', true)
+        ->call('loadStorageOnServer')
+        ->assertDispatched('error');
+    expect($file->fresh()->content)->toBe($source);
+})->with(['dockerfile', 'dockerimage']);
+
+test('Fabric template API passes node-specific environment lists without quoting or peer secrets', function () {
+    config(['fabric.configuration_enabled' => true]);
+    $this->application->update(['build_pack' => 'dockerimage']);
+    $other = Server::factory()->create(['team_id' => $this->team->id, 'private_key_id' => $this->server->private_key_id]);
+    $destination = StandaloneDocker::withoutEvents(fn () => StandaloneDocker::firstOrCreate(
+        ['server_id' => $other->id, 'network' => 'coolify'],
+        ['uuid' => (string) Str::uuid(), 'name' => 'template-test-docker'],
+    ));
+    $this->application->additional_networks()->attach($destination->id, ['server_id' => $other->id]);
+    $values = [$this->server->id => "primary \"quoted\"\nvalue", $other->id => 'secondary-value'];
+    $nodes = [];
+    foreach ([$this->server, $other] as $server) {
+        $nodes[(string) $server->id] = ['endpoint' => 'https://node-'.$server->id.'.test', 'token' => str_repeat('t', 32)];
+        SharedEnvironmentVariable::create([
+            'type' => 'server', 'server_id' => $server->id, 'team_id' => $this->team->id,
+            'key' => 'TEMPLATE_SECRET', 'value' => $values[$server->id],
+        ]);
+    }
+    config(['fabric.nodes_json' => json_encode($nodes)]);
+    EnvironmentVariable::create([
+        'key' => 'CONFIG_SECRET', 'value' => '{{server.TEMPLATE_SECRET}}',
+        'is_runtime' => true, 'is_buildtime' => false,
+        'resourceable_type' => Application::class, 'resourceable_id' => $this->application->id,
+    ]);
+    EnvironmentVariable::create([
+        'key' => 'BUILD_ONLY', 'value' => 'build-only-credential',
+        'is_runtime' => false, 'is_buildtime' => true,
+        'resourceable_type' => Application::class, 'resourceable_id' => $this->application->id,
+    ]);
+    $source = '{{range .env}}{{if eq .key "CONFIG_SECRET"}}{{.value}}{{end}}{{end}}';
+    $file = LocalFileVolume::create([
+        'fs_path' => $this->application->workdir().'/config.txt', 'mount_path' => '/config.txt',
+        'content' => 'old', 'is_directory' => false,
+        'resource_type' => Application::class, 'resource_id' => $this->application->id,
+    ]);
+    Http::fake(function ($request) use ($values, $source) {
+        $spec = $request['files'][0];
+        $data = $spec['template']['data'];
+        $id = $data['node']['id'];
+        expect($spec['template']['source'])->toBe($source)
+            ->and(collect($data['env'])->pluck('key')->all())->toBe(['CONFIG_SECRET'])
+            ->and($data['env'][0]['value'])->toBe($values[$id])
+            ->and(json_encode($data['nodes']))->not->toContain('secondary-value', 'CONFIG_SECRET', str_repeat('t', 32))
+            ->and(count($data['nodes']))->toBe(2);
+        $phase = str_ends_with($request->url(), '/render') ? 'rendered' : 'applied';
+        $digest = hash('sha256', $values[$id]);
+        if ($phase === 'applied') {
+            expect($spec['expected_sha256'])->toBe($digest);
+        }
+
+        return Http::response([$phase => true, 'files' => [['path' => $spec['path'], $phase => true, 'sha256' => $digest]]]);
+    });
+    $token = $this->admin->createToken('template-test', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'id' => $file->id, 'content' => $source, 'is_template' => true,
+        ])->assertOk()->assertHeader('X-Fabric-File-Mount-Refresh', 'redeploy-required');
+    expect($file->fresh()->is_template)->toBeTrue()->and($file->fresh()->content)->toBe($source);
+    Http::assertSentCount(4);
+});
+
+test('Fabric template mutation requires application admin permission', function (string $role) {
+    config(['fabric.configuration_enabled' => true]);
+    $this->application->update(['build_pack' => 'dockerimage']);
+    $user = User::factory()->create();
+    $team = $role === 'member' ? $this->team : Team::factory()->create();
+    $user->teams()->attach($team, ['role' => $role === 'member' ? 'member' : 'admin']);
+    session(['currentTeam' => $team]);
+    $token = $user->createToken('template-denied', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $response = $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'mount_path' => '/config.txt', 'content' => '{{.node.id}}', 'is_template' => true,
+        ]);
+    $response->assertStatus($role === 'member' ? 403 : 404);
+    expect($this->application->fileStorages()->count())->toBe(0);
+})->with(['member', 'other-team']);
+
+test('Fabric template creation rejects host files directories and disabled configuration', function (string $mode) {
+    config(['fabric.configuration_enabled' => $mode !== 'disabled']);
+    $this->application->update(['build_pack' => 'dockerimage']);
+    $token = $this->admin->createToken('template-invalid', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $fields = ['type' => 'file', 'mount_path' => '/config.txt', 'content' => '{{.node.id}}', 'is_template' => true];
+    if ($mode === 'host') {
+        $fields['is_host_file'] = true;
+        $fields['fs_path'] = '/etc/example.conf';
+    }
+    if ($mode === 'directory') {
+        $fields['is_directory'] = true;
+        $fields['fs_path'] = '/data/example';
+    }
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/applications/{$this->application->uuid}/storages", $fields)->assertStatus(422);
+    expect($this->application->fileStorages()->count())->toBe(0);
+})->with(['host', 'directory', 'disabled']);

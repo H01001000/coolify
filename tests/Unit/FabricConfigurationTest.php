@@ -1,6 +1,7 @@
 <?php
 
 use App\Exceptions\FabricConfigurationSyncException;
+use App\Jobs\ApplicationDeploymentJob;
 use App\Models\Application;
 use App\Models\LocalFileVolume;
 use App\Models\Server;
@@ -168,5 +169,106 @@ it('reports unavailable nodes without leaking transport errors or skipping other
 it('rejects cross-team destinations before sending any content', function () {
     $this->application->additional_servers->first()->team_id = 99;
     expect(fn () => $this->fabric->save($this->storage))->toThrow(RuntimeException::class);
+    Http::assertNothingSent();
+});
+
+it('delegates template rendering to each node and preflights the entire fleet before applying', function (string $buildPack) {
+    $this->application->build_pack = $buildPack;
+    $this->application->setRelation('runtime_environment_variables', collect());
+    $this->storage->is_template = true;
+    $source = '{{range .nodes}}{{if ne .id $.node.id}}{{.ip}}{{end}}{{end}}';
+    $this->storage->content = $source;
+    $rendered = [];
+    Http::fake(function (Request $request) use (&$rendered, $source) {
+        $file = $request['files'][0];
+        $data = $file['template']['data'];
+        $id = $data['node']['id'];
+        expect($file)->not->toHaveKey('content')
+            ->and($file['template']['source'])->toBe($source)
+            ->and($file['template']['engine'])->toBe('go-template/v1')
+            ->and(array_column($data['nodes'], 'id'))->toBe(['1', '2', '3'])
+            ->and($data['env'])->toBe([])
+            ->and(json_encode($data))->not->toContain(str_repeat('a', 32), str_repeat('b', 32), str_repeat('c', 32));
+        $digest = hash('sha256', 'rendered-for-'.$id);
+        $phase = str_ends_with($request->url(), '/render') ? 'rendered' : 'applied';
+        if ($phase === 'rendered') {
+            $rendered[] = $id;
+        } else {
+            expect(count($rendered))->toBe(3)->and($file['expected_sha256'])->toBe($digest);
+        }
+
+        return Http::response([$phase => true, 'files' => [['path' => $file['path'], $phase => true, 'sha256' => $digest]]]);
+    });
+    $results = $this->storage->saveStorageOnServer();
+    expect(count($results))->toBe(3)->and($this->storage->content)->toBe($source);
+    Http::assertSentCount(6);
+})->with(['dockerfile', 'dockerimage']);
+
+it('does not apply anywhere when a template preflight fails or an agent is too old', function (string $failure) {
+    $this->application->setRelation('runtime_environment_variables', collect());
+    $this->storage->is_template = true;
+    $this->storage->content = 'sensitive-template-source';
+    Http::fake(function (Request $request) use ($failure) {
+        expect($request->url())->toEndWith('/render');
+        $file = $request['files'][0];
+        if (str_contains($request->url(), 'node-two')) {
+            return $failure === 'old-agent'
+                ? Http::response(['error' => 'not_found'], 404)
+                : Http::response(['rendered' => false, 'files' => [['path' => $file['path'], 'rendered' => false, 'code' => 'invalid_template']]], 422);
+        }
+
+        return Http::response(['rendered' => true, 'files' => [['path' => $file['path'], 'rendered' => true, 'sha256' => hash('sha256', 'output')]]]);
+    });
+    try {
+        $this->storage->saveStorageOnServer();
+        test()->fail('Expected preflight failure');
+    } catch (FabricConfigurationSyncException $exception) {
+        expect($exception->results[1]['code'])->toBe('not_applied')
+            ->and($exception->results[2]['code'])->toBe($failure === 'old-agent' ? 'invalid_response' : 'invalid_template')
+            ->and($exception->getMessage())->not->toContain('sensitive-template-source');
+    }
+    Http::assertSentCount(3);
+})->with(['old-agent', 'bad-template']);
+
+it('keeps ordinary files literal even when their contents look like a template', function () {
+    $source = '{{.node.name}}';
+    $this->storage->content = $source;
+    Http::fake(function (Request $request) use ($source) {
+        expect($request->url())->toEndWith('/apply');
+        expect($request['files'][0]['content'])->toBe($source);
+
+        return Http::response(fabricReceipt($request));
+    });
+    $this->storage->saveStorageOnServer();
+    Http::assertSentCount(3);
+});
+
+it('rejects template server loads and disabled Fabric without replacing the source', function () {
+    $this->storage->is_template = true;
+    $source = '{{.node.name}}';
+    $this->storage->content = $source;
+    expect(fn () => $this->storage->loadStorageOnServer())->toThrow(RuntimeException::class);
+    config(['fabric.configuration_enabled' => false]);
+    expect(fn () => $this->storage->saveStorageOnServer())->toThrow(RuntimeException::class);
+    expect($this->storage->content)->toBe($source);
+    Http::assertNothingSent();
+});
+
+it('rejects template preview deployment before making requests', function () {
+    $this->storage->is_template = true;
+    $this->application->setRelation('fileStorages', collect([$this->storage]));
+    expect(fn () => $this->fabric->saveTemplatesForDeployment($this->application, 1))->toThrow(RuntimeException::class);
+    Http::assertNothingSent();
+});
+
+it('blocks template preview deployments before repository copying can touch host files', function () {
+    $this->storage->is_template = true;
+    $this->application->setRelation('fileStorages', collect([$this->storage]));
+    $class = new ReflectionClass(ApplicationDeploymentJob::class);
+    $job = $class->newInstanceWithoutConstructor();
+    $class->getProperty('application')->setValue($job, $this->application);
+    $class->getProperty('pull_request_id')->setValue($job, 17);
+    $method = $class->getMethod('write_deployment_configurations');
+    expect(fn () => $method->invoke($job))->toThrow(RuntimeException::class, 'preview');
     Http::assertNothingSent();
 });

@@ -19,6 +19,7 @@ use App\Models\StandaloneDocker;
 use App\Models\SwarmDocker;
 use App\Notifications\Application\DeploymentFailed;
 use App\Notifications\Application\DeploymentSuccess;
+use App\Services\FabricConfiguration;
 use App\Support\ValidationPatterns;
 use App\Traits\EnvironmentVariableAnalyzer;
 use App\Traits\ExecuteRemoteCommand;
@@ -663,6 +664,9 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
         $this->clone_repository();
         if ($this->preserveRepository) {
             foreach ($this->application->fileStorages as $fileStorage) {
+                if ($fileStorage->is_template) {
+                    continue;
+                }
                 $path = $fileStorage->fs_path;
                 $saveName = 'file_stat_'.$fileStorage->id;
                 $realPathInGit = str($path)->replace($this->application->workdir(), $this->workdir)->value();
@@ -1070,6 +1074,9 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
 
     private function write_deployment_configurations()
     {
+        if ($this->pull_request_id !== 0 && $this->application->fileStorages->contains('is_template', true)) {
+            throw new \RuntimeException('Templated file mounts do not support preview deployments yet.');
+        }
         if ($this->preserveRepository) {
             if ($this->use_build_server) {
                 $this->server = $this->mainServer;
@@ -1085,7 +1092,7 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                 );
             }
             foreach ($this->application->fileStorages as $fileStorage) {
-                if (! $fileStorage->is_host_file && ! $fileStorage->is_based_on_git && ! $fileStorage->is_directory) {
+                if (! $fileStorage->is_template && ! $fileStorage->is_host_file && ! $fileStorage->is_based_on_git && ! $fileStorage->is_directory) {
                     $fileStorage->saveStorageOnServer();
                 }
             }
@@ -1093,6 +1100,7 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
                 $this->server = $this->build_server;
             }
         }
+        app(FabricConfiguration::class)->saveTemplatesForDeployment($this->application, $this->pull_request_id);
         if (isset($this->docker_compose_base64)) {
             if ($this->use_build_server) {
                 $this->server = $this->mainServer;
