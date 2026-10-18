@@ -554,3 +554,33 @@ test('managed source path adoption rejects paths outside or at the application r
         ])->assertStatus(422);
     expect($this->application->fileStorages()->count())->toBe(0);
 })->with(['outside', 'root', 'sibling']);
+
+test('file storage API preserves leading whitespace and final newlines on create and save', function () {
+    $source = "  config: true\n\n";
+    $token = $this->admin->createToken('exact-file-bytes', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'mount_path' => '/etc/exact.yml', 'content' => $source,
+        ])->assertCreated();
+    $file = $this->application->fileStorages()->sole();
+    expect($file->content)->toBe($source);
+
+    $updated = "\n  config: false\n";
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'uuid' => $file->uuid, 'content' => $updated,
+        ])->assertOk();
+    expect($file->fresh()->content)->toBe($updated);
+});
+
+test('server configuration values retain significant whitespace through the API', function () {
+    $token = $this->admin->createToken('exact-server-value', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $value = "  exact scalar\n";
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/servers/{$this->server->uuid}/envs", [
+            'key' => 'EXACT_CONFIG_FRAGMENT', 'value' => $value, 'is_literal' => true,
+        ])->assertCreated();
+    expect(SharedEnvironmentVariable::where('server_id', $this->server->id)->where('key', 'EXACT_CONFIG_FRAGMENT')->sole()->value)->toBe($value);
+});

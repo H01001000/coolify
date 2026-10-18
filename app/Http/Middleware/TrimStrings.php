@@ -15,5 +15,12 @@ class TrimStrings extends Middleware
         'current_password',
         'password',
         'password_confirmation',
+        // File bodies, templates, and configuration values are byte-sensitive.
+        'content',
+        '*.content',
+        'file_storage_content',
+        '*.file_storage_content',
+        'value',
+        '*.value',
     ];
 }
