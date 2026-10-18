@@ -4947,6 +4947,7 @@ class ApplicationsController extends Controller
                             'mount_path' => ['type' => 'string', 'description' => 'The container mount path (not allowed for read-only storages).'],
                             'content' => ['type' => 'string', 'nullable' => true, 'description' => 'The file content (file only, not allowed for read-only storages).'],
                             'is_template' => ['type' => 'boolean', 'description' => 'Render separately on each destination using Fabric Go templates.'],
+                            'is_host_file' => ['type' => 'boolean', 'description' => 'Set true to adopt an existing regular file as bind-only without modifying its source. This conversion cannot be reversed through PATCH.'],
                         ],
                         additionalProperties: false,
                     ),
@@ -5009,9 +5010,10 @@ class ApplicationsController extends Controller
             'mount_path' => 'string',
             'content' => 'string|nullable',
             'is_template' => 'boolean',
+            'is_host_file' => 'boolean',
         ]);
 
-        $allAllowedFields = ['uuid', 'id', 'type', 'is_preview_suffix_enabled', 'name', 'mount_path', 'content', 'is_template'];
+        $allAllowedFields = ['uuid', 'id', 'type', 'is_preview_suffix_enabled', 'name', 'mount_path', 'content', 'is_template', 'is_host_file'];
         $extraFields = array_diff(array_keys($request->all()), $allAllowedFields);
         if ($validator->fails() || ! empty($extraFields)) {
             $errors = $validator->errors();
@@ -5053,7 +5055,7 @@ class ApplicationsController extends Controller
         }
 
         $isReadOnly = $storage->shouldBeReadOnlyInUI();
-        $editableOnlyFields = ['name', 'mount_path', 'content', 'is_template'];
+        $editableOnlyFields = ['name', 'mount_path', 'content', 'is_template', 'is_host_file'];
         $requestedEditableFields = array_intersect($editableOnlyFields, array_keys($request->all()));
 
         if ($isReadOnly && ! empty($requestedEditableFields)) {
@@ -5066,7 +5068,7 @@ class ApplicationsController extends Controller
         // Reject fields that don't apply to the given storage type
         if (! $isReadOnly) {
             $typeSpecificInvalidFields = $request->type === 'persistent'
-                ? array_intersect(['content', 'is_template'], array_keys($request->all()))
+                ? array_intersect(['content', 'is_template', 'is_host_file'], array_keys($request->all()))
                 : array_intersect(['name', 'host_path'], array_keys($request->all()));
 
             if (! empty($typeSpecificInvalidFields)) {
@@ -5103,6 +5105,23 @@ class ApplicationsController extends Controller
                     $storage->content = $request->content;
                 }
             }
+        }
+
+        if ($storage instanceof LocalFileVolume && $storage->is_host_file && $request->has('content')) {
+            return response()->json(['message' => 'Host file mounts are bind-only and cannot store content.'], 422);
+        }
+        if ($request->has('is_host_file')) {
+            if (! $storage instanceof LocalFileVolume || ! $request->boolean('is_host_file')
+                || $storage->is_directory || $storage->is_based_on_git || $storage->is_template || $request->has('content')) {
+                return response()->json(['message' => 'Only a managed regular file can be adopted as a bind-only host file. Content and template mode cannot be supplied.'], 422);
+            }
+            try {
+                validateHostFileMountPath($storage->fs_path, 'host file source path');
+            } catch (\Throwable $e) {
+                return response()->json(['message' => $e->getMessage()], 422);
+            }
+            $storage->is_host_file = true;
+            $storage->content = null;
         }
 
         $storage->save();
@@ -5178,7 +5197,7 @@ class ApplicationsController extends Controller
                             'content' => ['type' => 'string', 'nullable' => true, 'description' => 'File content (file only, optional).'],
                             'is_template' => ['type' => 'boolean', 'description' => 'Render separately on each destination using Fabric Go templates.'],
                             'is_directory' => ['type' => 'boolean', 'description' => 'Whether this is a directory mount (file only, default false).'],
-                            'fs_path' => ['type' => 'string', 'description' => 'Host directory path (required when is_directory is true).'],
+                            'fs_path' => ['type' => 'string', 'description' => 'Host source path. Required for directories/host files; optional managed-file sources must stay inside this application configuration directory.'],
                         ],
                         additionalProperties: false,
                     ),
@@ -5351,7 +5370,13 @@ class ApplicationsController extends Controller
         } else {
             try {
                 $mountPath = validateFileMountPath($request->mount_path, 'file storage path');
-                $fsPath = confineFileMountPath(application_configuration_dir().'/'.$application->uuid, $mountPath, 'file storage path');
+                $basePath = application_configuration_dir().'/'.$application->uuid;
+                $fsPath = $request->filled('fs_path')
+                    ? confinePathToBase($basePath, $request->fs_path, 'managed file source')
+                    : confineFileMountPath($basePath, $mountPath, 'file storage path');
+                if ($fsPath === $basePath) {
+                    throw new \RuntimeException('A managed file source cannot be the application directory itself.');
+                }
             } catch (\Throwable $e) {
                 return response()->json([
                     'message' => 'Validation failed.',

@@ -130,3 +130,20 @@ Existing bind mounts still need container recreation to observe atomic inode
 replacement. Save neither deploys nor reloads the application. There is no
 automatic takeover of Ansible-owned files: review ownership and rendered
 configuration before enabling template mode on existing production mounts.
+
+## Existing file ownership handover
+
+Application storage PATCH accepts is_host_file=true to convert an existing
+managed regular-file record into a bind-only reference. The source path is not
+written, deleted or changed; stored content is cleared. Directories, Git files,
+active template mode, content payloads, read-only mounts and reverse conversion
+are rejected. Normal application admin/team authorization still applies.
+
+This is useful when a migration app shares a configuration file owned by its
+main application. Only the main application should render/save that file.
+
+Managed-file Create also accepts an optional fs_path within the application's
+configuration directory. This permits a generated file inside an existing
+directory mount to retain its current host path even when it differs from the
+container destination. The application root itself and paths outside it are
+rejected. Omitting fs_path retains the existing destination-derived behavior.

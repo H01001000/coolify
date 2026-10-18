@@ -470,3 +470,87 @@ test('Fabric template creation rejects host files directories and disabled confi
         ->postJson("/api/v1/applications/{$this->application->uuid}/storages", $fields)->assertStatus(422);
     expect($this->application->fileStorages()->count())->toBe(0);
 })->with(['host', 'directory', 'disabled']);
+
+test('host file adoption changes only storage metadata and retains shared source paths', function () {
+    config(['fabric.configuration_enabled' => true]);
+    $this->application->update(['build_pack' => 'dockerimage']);
+    $path = '/data/coolify/applications/other-app/shared/config.yml';
+    $file = LocalFileVolume::create([
+        'fs_path' => $path, 'mount_path' => '/etc/config.yml', 'content' => 'old saved copy',
+        'is_directory' => false, 'resource_id' => $this->application->id, 'resource_type' => Application::class,
+    ]);
+    Http::preventStrayRequests();
+    $token = $this->admin->createToken('adopt-host-file', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'uuid' => $file->uuid, 'is_host_file' => true,
+        ])->assertOk();
+    expect($file->fresh()->is_host_file)->toBeTrue()->and($file->fresh()->content)->toBeNull()
+        ->and($file->fresh()->fs_path)->toBe($path);
+    Http::assertNothingSent();
+});
+
+test('host file adoption rejects reverse conversion incompatible modes and content', function (string $mode) {
+    $file = LocalFileVolume::create([
+        'fs_path' => $this->application->workdir().'/config.yml', 'mount_path' => '/etc/config.yml',
+        'content' => $mode === 'reverse' ? null : 'original', 'is_directory' => $mode === 'directory',
+        'is_host_file' => $mode === 'reverse', 'is_based_on_git' => $mode === 'git',
+        'resource_id' => $this->application->id, 'resource_type' => Application::class,
+    ]);
+    $body = ['type' => 'file', 'uuid' => $file->uuid, 'is_host_file' => $mode !== 'reverse'];
+    if ($mode === 'content') {
+        $body['content'] = 'must not write';
+    }
+    $token = $this->admin->createToken('invalid-adoption', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", $body)->assertStatus(422);
+    expect($file->fresh()->is_host_file)->toBe($mode === 'reverse')
+        ->and($file->fresh()->content)->toBe($mode === 'reverse' ? null : 'original');
+})->with(['reverse', 'directory', 'git', 'content']);
+
+test('host file adoption requires resource admin access', function (string $role) {
+    $file = LocalFileVolume::create([
+        'fs_path' => $this->application->workdir().'/config.yml', 'mount_path' => '/etc/config.yml',
+        'is_directory' => false, 'resource_id' => $this->application->id, 'resource_type' => Application::class,
+    ]);
+    $user = User::factory()->create();
+    $team = $role === 'member' ? $this->team : Team::factory()->create();
+    $user->teams()->attach($team, ['role' => $role === 'member' ? 'member' : 'admin']);
+    session(['currentTeam' => $team]);
+    $token = $user->createToken('denied-adoption', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->patchJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'uuid' => $file->uuid, 'is_host_file' => true,
+        ])->assertStatus($role === 'member' ? 403 : 404);
+    expect($file->fresh()->is_host_file)->toBeFalse();
+})->with(['member', 'other-team']);
+
+test('managed files can adopt an explicit source path inside their application', function () {
+    $token = $this->admin->createToken('managed-source', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $path = $this->application->workdir().'/powerdns/config.yml';
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'mount_path' => '/etc/powerdns/config.yml', 'fs_path' => $path, 'content' => 'existing',
+        ])->assertCreated();
+    expect($this->application->fileStorages()->first()->fs_path)->toBe($path);
+});
+
+test('managed source path adoption rejects paths outside or at the application root', function (string $kind) {
+    $base = $this->application->workdir();
+    $path = match ($kind) {
+        'outside' => '/etc/example.conf',
+        'root' => $base,
+        'sibling' => $base.'-other/config.yml',
+    };
+    $token = $this->admin->createToken('invalid-source', ['*'])->plainTextToken;
+    Auth::forgetGuards();
+    $this->withHeader('Authorization', 'Bearer '.$token)
+        ->postJson("/api/v1/applications/{$this->application->uuid}/storages", [
+            'type' => 'file', 'mount_path' => '/etc/config.yml', 'fs_path' => $path, 'content' => 'never written',
+        ])->assertStatus(422);
+    expect($this->application->fileStorages()->count())->toBe(0);
+})->with(['outside', 'root', 'sibling']);
