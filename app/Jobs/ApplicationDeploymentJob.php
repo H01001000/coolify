@@ -23,6 +23,7 @@ use App\Models\StandaloneDocker;
 use App\Models\SwarmDocker;
 use App\Notifications\Application\DeploymentFailed;
 use App\Notifications\Application\DeploymentSuccess;
+use App\Services\FabricCompose;
 use App\Services\FabricConfiguration;
 use App\Support\RemoteSecretReferences;
 use App\Support\RemoteSecretValueFormatter;
@@ -4131,6 +4132,7 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
         $persistent_storages = $this->generate_local_persistent_volumes();
         $persistent_file_volumes = $this->application->fileStorages()->get();
         $volume_names = $this->generate_local_persistent_volumes_only_volume_names();
+        $labels = collect();
         if (data_get($this->application, 'custom_labels')) {
             $this->application->parseContainerLabels();
             $labels = collect(preg_split("/\r\n|\n|\r/", base64_decode($this->application->custom_labels)));
@@ -4166,6 +4168,21 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
             ]);
             $this->application->parseHealthcheckFromDockerfile($this->saved_outputs->get('dockerfile_from_repo'));
         }
+        if (config('fabric.compose_enabled')) {
+            $specification = $this->fabric_compose_specification($ports, $persistent_storages, $persistent_file_volumes, $volume_names, $labels);
+            // Generate for the deployment node, even when the helper uses a separate build server.
+            $this->docker_compose = app(FabricCompose::class)->generate($this->mainServer->id, $specification);
+            $this->generated_docker_compose = $this->docker_compose;
+            $this->execute_remote_command([
+                "docker exec -i {$this->deployment_uuid} tee {$this->workdir}/docker-compose.yaml > /dev/null",
+                'input' => $this->docker_compose,
+                'hidden' => true,
+                'skip_command_log' => true,
+            ]);
+
+            return;
+        }
+
         $custom_network_aliases = [];
         if (! empty($this->application->custom_network_aliases_array)) {
             $custom_network_aliases = $this->application->custom_network_aliases_array;
@@ -4372,6 +4389,89 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
             'hidden' => true,
             'skip_command_log' => true,
         ]);
+    }
+
+    /** Resolve Coolify inputs only; Fabric assembles the Compose document without model access. */
+    private function fabric_compose_specification(array $ports, array $storages, $fileStorages, array $volumeNames, array $labels): array
+    {
+        $preview = $this->pull_request_id !== 0;
+        $consistent = (bool) $this->application->settings->is_consistent_container_name_enabled;
+        $healthcheck = null;
+        if (! $this->application->custom_healthcheck_found && ! $this->application->isHealthcheckDisabled()) {
+            $command = $this->generate_healthcheck_commands();
+            if ($command !== null) {
+                $healthcheck = [
+                    'test' => ['CMD-SHELL', $command],
+                    'interval' => $this->application->health_check_interval.'s',
+                    'timeout' => $this->application->health_check_timeout.'s',
+                    'retries' => $this->application->health_check_retries,
+                    'start_period' => $this->application->health_check_start_period.'s',
+                ];
+            }
+        }
+        $limits = [
+            'mem_limit' => $this->application->limits_memory,
+            'memswap_limit' => $this->application->limits_memory_swap,
+            'mem_swappiness' => $this->application->limits_memory_swappiness,
+            'mem_reservation' => $this->application->limits_memory_reservation,
+            'cpus' => (float) $this->application->limits_cpus,
+            'cpu_shares' => $this->application->limits_cpu_shares,
+        ];
+        if ($this->application->limits_cpuset !== null) {
+            $limits['cpuset'] = $this->application->limits_cpuset;
+        }
+        $swarm = null;
+        if ($this->mainServer->isSwarm()) {
+            $overrides = $this->application->swarm_placement_constraints
+                ? Yaml::parse(base64_decode($this->application->swarm_placement_constraints)) : [];
+            $swarm = [
+                'replicas' => (int) ($this->application->swarm_replicas ?? 1),
+                'cpus' => $this->application->limits_cpus,
+                'memory' => $this->application->limits_memory,
+                'overrides' => (object) $overrides,
+                'worker_only' => (bool) $this->application->settings->is_swarm_only_worker_nodes,
+            ];
+        }
+        $gpu = null;
+        if ($this->application->settings->is_gpu_enabled) {
+            $gpu = [
+                'driver' => data_get($this->application, 'settings.gpu_driver', 'nvidia'),
+                'capabilities' => ['gpu'],
+                'options' => data_get($this->application, 'settings.gpu_options', []),
+            ];
+            $count = data_get($this->application, 'settings.gpu_count');
+            if ($count) {
+                $gpu['count'] = $count === 'all' ? $count : (int) $count;
+            } elseif (data_get($this->application, 'settings.gpu_device_ids')) {
+                $gpu['ids'] = $this->application->settings->gpu_device_ids;
+            }
+        }
+
+        return [
+            'schema_version' => 1,
+            'container_name' => $this->container_name,
+            'service_name' => ! $preview && $consistent ? $this->application->uuid : $this->container_name,
+            'image' => $this->production_image_name,
+            'network' => $this->destination->network,
+            'restart' => RESTART_MODE,
+            'labels' => array_values($labels),
+            'aliases' => array_values($this->application->custom_network_aliases_array ?? []),
+            'expose' => array_values($ports),
+            'limits' => (object) $limits,
+            'stop_grace_period' => $this->application->settings->stop_grace_period !== null
+                ? $this->application->settings->stopGracePeriodSeconds().'s' : null,
+            'healthcheck' => $healthcheck,
+            'swarm' => $swarm,
+            'logging' => $this->mainServer->isLogDrainEnabled() && $this->application->isLogDrainEnabled()
+                ? generate_fluentd_configuration() : null,
+            'gpu' => $gpu,
+            'ports' => array_values($this->application->ports_mappings_array),
+            'volumes' => array_merge($storages, $fileStorages->map(fn ($file) => "$file->fs_path:$file->mount_path")->all()),
+            'named_volumes' => (object) $volumeNames,
+            'custom_options' => (object) ($preview ? [] : convertDockerRunToCompose($this->application->custom_docker_run_options)),
+            'preview' => $preview,
+            'consistent_name' => $consistent,
+        ];
     }
 
     private function generate_local_persistent_volumes()
