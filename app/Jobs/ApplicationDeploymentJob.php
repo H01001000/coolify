@@ -4434,16 +4434,9 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
         }
         $gpu = null;
         if ($this->application->settings->is_gpu_enabled) {
-            $gpu = [
-                'driver' => data_get($this->application, 'settings.gpu_driver', 'nvidia'),
-                'capabilities' => ['gpu'],
-                'options' => data_get($this->application, 'settings.gpu_options', []),
-            ];
-            $count = data_get($this->application, 'settings.gpu_count');
-            if ($count) {
-                $gpu['count'] = $count === 'all' ? $count : (int) $count;
-            } elseif (data_get($this->application, 'settings.gpu_device_ids')) {
-                $gpu['ids'] = $this->application->settings->gpu_device_ids;
+            $gpu = $this->application->settings->gpuDeviceReservation();
+            if (ApplicationSetting::parseGpuOptions($this->application->settings->gpu_options) === null) {
+                $this->application_deployment_queue->addLogEntry('GPU options are not a valid key=value list or YAML mapping. They are ignored.');
             }
         }
 
@@ -4463,7 +4456,7 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
             'healthcheck' => $healthcheck,
             'swarm' => $swarm,
             'logging' => $this->mainServer->isLogDrainEnabled() && $this->application->isLogDrainEnabled()
-                ? generate_fluentd_configuration() : null,
+                ? generate_log_drain_configuration($this->mainServer) : null,
             'gpu' => $gpu,
             'ports' => array_values($this->application->ports_mappings_array),
             'volumes' => array_merge($storages, $fileStorages->map(fn ($file) => "$file->fs_path:$file->mount_path")->all()),

@@ -3,6 +3,7 @@
 use App\Jobs\ApplicationDeploymentJob;
 use App\Models\Application;
 use App\Models\ApplicationDeploymentQueue;
+use App\Models\ApplicationSetting;
 use App\Models\Server;
 use App\Models\StandaloneDocker;
 use App\Services\FabricCompose;
@@ -130,7 +131,7 @@ class FabricComposeApplication extends Application
 
     public function isLogDrainEnabled()
     {
-        return false;
+        return (bool) ($this->data['log_drain_enabled'] ?? false);
     }
 
     public function fileStorages()
@@ -177,7 +178,19 @@ function composeDeployment(bool $swarm = false): FabricComposeDeployment
 
         public string $gpu_count = 'all';
 
-        public array $gpu_options = [];
+        public string $gpu_options = '';
+
+        public string $gpu_device_ids = '';
+
+        public function gpuDeviceReservation(): array
+        {
+            return (new ApplicationSetting([
+                'gpu_driver' => $this->gpu_driver,
+                'gpu_count' => $this->gpu_count,
+                'gpu_device_ids' => $this->gpu_device_ids,
+                'gpu_options' => $this->gpu_options,
+            ]))->gpuDeviceReservation();
+        }
 
         public ?int $stop_grace_period = 700;
 
@@ -201,7 +214,13 @@ function composeDeployment(bool $swarm = false): FabricComposeDeployment
     $server->shouldReceive('getSchemalessAttributes')->andReturn([]);
     $server->shouldReceive('getAttribute')->with('id')->andReturn(1);
     $server->shouldReceive('isSwarm')->andReturn($swarm);
-    $server->shouldReceive('isLogDrainEnabled')->andReturn(false);
+    $server->shouldReceive('isLogDrainEnabled')->andReturnUsing(fn () => (bool) ($app->data['log_drain_enabled'] ?? false));
+    $server->shouldReceive('isFluentBitLogDrainEnabled')->andReturnUsing(fn () => ($app->data['log_driver'] ?? '') === 'fluentd');
+    $server->shouldReceive('getAttribute')->with('settings')->andReturn((object) [
+        'logdrain_cloudwatch_region' => 'us-west-2',
+        'logdrain_cloudwatch_group' => '/coolify/parity',
+        'logdrain_cloudwatch_stream_prefix' => 'parity/',
+    ]);
     $destination = Mockery::mock(StandaloneDocker::class);
     $destination->shouldReceive('getAttribute')->with('network')->andReturn('coolify');
     $queue = Mockery::mock(ApplicationDeploymentQueue::class);
@@ -270,11 +289,18 @@ it('matches the legacy generator through a real Fabric HTTP server', function (s
         $application->settings->stop_grace_period = null;
     } elseif ($scenario === 'custom-options') {
         $application->custom_docker_run_options = '--entrypoint "/bin/echo hello world" --cap-add NET_ADMIN --security-opt no-new-privileges:true --tmpfs /tmp:rw,size=64m';
-    } elseif ($scenario === 'gpu') {
+    } elseif (in_array($scenario, ['gpu', 'gpu-options', 'gpu-device-ids'], true)) {
         $application->settings->is_gpu_enabled = true;
         $application->settings->gpu_driver = 'nvidia';
         $application->settings->gpu_count = 'all';
-        $application->settings->gpu_options = [];
+        $application->settings->gpu_options = $scenario === 'gpu-options' ? "foo=bar\nbaz=qux" : '';
+        if ($scenario === 'gpu-device-ids') {
+            $application->settings->gpu_count = '';
+            $application->settings->gpu_device_ids = ' 0, 2 ';
+        }
+    } elseif (in_array($scenario, ['fluentd', 'cloudwatch'], true)) {
+        $application->data['log_drain_enabled'] = true;
+        $application->data['log_driver'] = $scenario;
     } elseif ($scenario === 'dockerfile-healthcheck') {
         $application->custom_healthcheck_found = true;
     } elseif ($scenario === 'named-volume') {
@@ -294,7 +320,7 @@ it('matches the legacy generator through a real Fabric HTTP server', function (s
     $reflection->getMethod('generate_compose_file')->invoke($job);
     $remote = Yaml::parse($reflection->getProperty('docker_compose')->getValue($job));
     expect($remote)->toEqual($legacy);
-})->with(['consistent-ip', 'generated-ip', 'no-options', 'custom-options', 'gpu', 'dockerfile-healthcheck', 'named-volume', 'swarm']);
+})->with(['consistent-ip', 'generated-ip', 'no-options', 'custom-options', 'gpu', 'gpu-options', 'gpu-device-ids', 'fluentd', 'cloudwatch', 'dockerfile-healthcheck', 'named-volume', 'swarm']);
 
 it('does not publish a document when the RPC fails', function () {
     Http::fake(fn () => Http::response('private remote error', 500));
