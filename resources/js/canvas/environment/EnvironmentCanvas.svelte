@@ -120,7 +120,7 @@
   /** Server view: key of the card's group when the card can be moved there (it is saved on its environment canvas). */
   const movableGroupOf = node => (canMoveGroups && node ? groupKey([node], node.zone) : null);
   let groupMeta = {}; // server view: frame top-left and zone inner top-left per group key (see layoutServerView)
-  // Projects canvas: admins drag the project zones; each project saves the zone's top-left (zone.position).
+  // Projects, servers and dashboard canvases: admins drag the zones; each project or server saves its top-left (zone.position).
   const canMoveZones = $derived(canEdit && !!graph?.can_move_zones);
   let zoneOrigins = {}; // server view: top-left per zone id (see layoutServerView)
   // Environment canvas endpoints of a card (the server view has no endpoints of its own for changes).
@@ -217,14 +217,15 @@
   // so the top bar keeps only the brand and breadcrumb.
   const topbar = document.querySelector('.app-topbar');
   const floatingBar = () => desktop.matches && !!topbar && document.documentElement.dataset.navStyle === 'floating';
-  // Floating nav: the canvas fills the screen behind the top bar and the sidebar (see app.css),
-  // so fit and the side panel use only the part that the floating panels do not cover.
+  // Desktop: the canvas fills the space behind the top bar (and, with floating nav, the sidebar; see app.css),
+  // so fit and the side panel use only the part that the top bar and floating panels do not cover.
   function coveredInsets() {
     const gap = 8;
     const v = viewport.getBoundingClientRect();
     // The bottom-left controls and deployments sit below the cards; fit keeps no side space for them.
     const deploymentsRight = 0;
-    if (!floatingBar()) return { top: 0, left: Math.max(0, deploymentsRight) };
+    if (!desktop.matches || !topbar) return { top: 0, left: Math.max(0, deploymentsRight) };
+    if (!floatingBar()) return { top: Math.max(0, topbar.getBoundingClientRect().bottom + gap - v.top), left: Math.max(0, deploymentsRight) };
     // The main sidebar, and a page's fixed settings rail (server canvas) when it is on the left.
     const rail = document.querySelector('.application-settings-navigation');
     const panels = [document.querySelector('.app-sidebar > div > nav'), rail && getComputedStyle(rail).position === 'fixed' ? rail : null]
@@ -241,7 +242,7 @@
   const inControls = () => !!bar?.closest('[data-canvas-controls]');
   function alignFloatingBar() {
     if (!floatingBar()) {
-      panelTop = '';
+      panelTop = desktop.matches && topbar ? `${coveredInsets().top}px` : '';
       return;
     }
     if (inControls()) {
@@ -540,7 +541,7 @@
   }
 
   /**
-   * Projects canvas: saves the place of a moved zone. Zones that are still placed automatically are saved where they
+   * Projects, servers and dashboard canvases: saves the place of a moved zone. Zones that are still placed automatically are saved where they
    * are too, so they do not move into the space the zone left.
    */
   async function saveZones(id, delta) {
@@ -571,7 +572,7 @@
     const starts = Object.fromEntries(ids.map(id => [id, { ...positions[id] }]));
     const box = toBox(frame);
     const others = frames.filter(f => f !== frame && f.zone === frame.zone).map(toBox);
-    // Projects canvas: zones can sit anywhere, so the group's zone must not grow over another zone.
+    // Movable zones can sit anywhere, so the group's zone must not grow over another zone.
     const otherZones = canMoveZones ? boxes.filter(z => z.id !== frame.zone).map(toBox) : [];
     const top = ZONE_PADDING + zoneHeader(boxes.find(z => z.id === frame.zone)?.zone);
     const zoneAround = b => {
