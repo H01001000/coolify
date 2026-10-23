@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Actions\Server\ValidateServer;
 use App\Enums\ProxyTypes;
 use App\Exceptions\RateLimitException;
+use App\Http\Controllers\Api\Concerns\RequiresDeployAbility;
 use App\Http\Controllers\Controller;
 use App\Models\CloudProviderToken;
 use App\Models\PrivateKey;
@@ -16,10 +17,13 @@ use App\Services\DigitalOceanService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class DigitalOceanController extends Controller
 {
+    use RequiresDeployAbility;
+
     private function getCloudProviderTokenUuid(Request $request): ?string
     {
         return $request->cloud_provider_token_uuid ?? $request->cloud_provider_token_id;
@@ -197,11 +201,13 @@ class DigitalOceanController extends Controller
         path: '/servers/digitalocean',
         operationId: 'create-digitalocean-server',
         summary: 'Create a server on DigitalOcean',
+        description: 'Create a DigitalOcean droplet and link it as a Coolify server. A cloud-init script or extra SSH key IDs need a token with the deploy permission.',
         security: [['bearerAuth' => []]],
         tags: ['DigitalOcean'],
         responses: [
             new OA\Response(response: 201, description: 'DigitalOcean droplet created and linked to a Coolify server.'),
             new OA\Response(response: 401, ref: '#/components/responses/401'),
+            new OA\Response(response: 403, description: 'The token needs the deploy permission for a cloud-init script or extra SSH keys.'),
             new OA\Response(response: 422, description: 'Validation failed.'),
             new OA\Response(response: 429, description: 'DigitalOcean rate limit exceeded.'),
         ]
@@ -263,6 +269,13 @@ class DigitalOceanController extends Controller
             ], 422);
         }
 
+        if (! empty($request->cloud_init_script) || ! empty($request->digitalocean_ssh_key_ids)) {
+            $forbidden = $this->deployAbilityForbiddenResponse($request, 'A cloud-init script or extra SSH keys run as root on the new server, so it needs a token with the deploy permission.');
+            if ($forbidden) {
+                return $forbidden;
+            }
+        }
+
         $team = Team::find($teamId);
         if (Team::serverLimitReached($team)) {
             return response()->json(['message' => 'Server limit reached for your subscription.'], 400);
@@ -316,7 +329,7 @@ class DigitalOceanController extends Controller
             $dropletId = (int) $droplet['id'];
 
             $server = DB::transaction(function () use ($normalizedServerName, $teamId, $privateKey, $token, $dropletId, $droplet): Server {
-                $server = Server::create([
+                $server = Team::createServerWithinLimit($teamId, [
                     'name' => $normalizedServerName,
                     'ip' => Server::PLACEHOLDER_IP,
                     'user' => 'root',
@@ -366,6 +379,13 @@ class DigitalOceanController extends Controller
                 'digitalocean_droplet_id' => $dropletId,
                 'ip' => $server->ip,
             ])->setStatusCode(201);
+        } catch (ValidationException $e) {
+            if (! isset($e->errors()['server'])) {
+                throw $e;
+            }
+            $this->deleteUntrackedDroplet($digitalOceanService, $dropletId, $server);
+
+            return response()->json(['message' => 'Server limit reached for your subscription.'], 400);
         } catch (RateLimitException $e) {
             $this->deleteUntrackedDroplet($digitalOceanService, $dropletId, $server);
 

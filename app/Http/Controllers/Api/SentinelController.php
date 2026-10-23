@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Events\SentinelSynchronized;
 use App\Http\Controllers\Controller;
+use App\Jobs\CheckAndStartSentinelJob;
 use App\Jobs\ProcessSentinelSnapshotJob;
 use App\Models\Server;
 use App\Services\SentinelSnapshotStore;
@@ -60,6 +61,7 @@ class SentinelController extends Controller
                 'server_uuid' => $server->uuid,
                 'team_id' => $server->team_id,
             ]);
+            $server->rememberSentinelPushProblem('Coolify rejected the push: the subscription of this team is not active.');
 
             return response()->json(['message' => 'Unauthorized'], 401);
         }
@@ -69,6 +71,7 @@ class SentinelController extends Controller
                 'server_uuid' => $server->uuid,
                 'team_id' => $server->team_id,
             ]);
+            $server->rememberSentinelPushProblem('Coolify rejected the push: the server is marked unreachable, not usable, or disabled. Validate the server connection.');
 
             return response()->json(['message' => 'Server is not functional'], 401);
         }
@@ -78,6 +81,7 @@ class SentinelController extends Controller
                 'server_uuid' => $server->uuid,
                 'team_id' => $server->team_id,
             ]);
+            $server->rememberSentinelPushProblem('Coolify rejected the push: the Sentinel token does not match. Sync Sentinel to apply the current token.');
 
             return response()->json(['message' => 'Unauthorized'], 401);
         }
@@ -86,6 +90,8 @@ class SentinelController extends Controller
         ]);
 
         if ($validator->fails()) {
+            $server->rememberSentinelPushProblem('Coolify rejected the push: the payload is not valid.');
+
             return response()->json(serializeApiResponse([
                 'message' => 'Validation failed.',
                 'errors' => $validator->errors(),
@@ -101,8 +107,11 @@ class SentinelController extends Controller
         $server->sentinelHeartbeat();
 
         if (! $wasSentinelLive) {
+            $server->rememberSentinelPushProblem(null);
             SentinelSynchronized::dispatch($server);
         }
+
+        $this->updateSentinelIfOutdated($server, $request->header('X-Sentinel-Version'));
 
         try {
             if ($this->shouldDispatchUpdate($server, $data)) {
@@ -115,6 +124,30 @@ class SentinelController extends Controller
         }
 
         return response()->json(['message' => 'ok'], 200);
+    }
+
+    /**
+     * Sentinel sends its version on every push, so an outdated Sentinel is found without SSH.
+     * The reported version also tells ServerManagerJob to skip its hourly SSH version check.
+     * Old Sentinel versions do not send the header and keep the hourly SSH check.
+     */
+    private function updateSentinelIfOutdated(Server $server, ?string $runningVersion): void
+    {
+        if (! is_string($runningVersion) || preg_match('/^\d+\.\d+\.\d+$/', $runningVersion) !== 1) {
+            return;
+        }
+
+        Cache::put(Server::sentinelReportedVersionCacheKey($server->id), $runningVersion, now()->addHours(2));
+
+        $latestVersion = data_get(get_versions_data(), 'coolify.sentinel.version');
+        if (blank($latestVersion) || version_compare($runningVersion, $latestVersion, '>=')) {
+            return;
+        }
+
+        // Retry at most hourly if an update fails.
+        if (Cache::add("sentinel:update-dispatched:{$server->id}", true, 3600)) {
+            CheckAndStartSentinelJob::dispatch($server);
+        }
     }
 
     /**

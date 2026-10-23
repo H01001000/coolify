@@ -1,13 +1,15 @@
 # Versions
 # https://hub.docker.com/r/serversideup/php/tags?name=8.4-fpm-nginx-alpine
-ARG SERVERSIDEUP_PHP_VERSION=8.4-fpm-nginx-alpine
+ARG SERVERSIDEUP_PHP_VERSION=8.4-fpm-nginx-alpine-v5.0.2
 # https://github.com/cloudflare/cloudflared/releases
-ARG CLOUDFLARED_VERSION=2025.7.0
+ARG CLOUDFLARED_VERSION=2026.10.3
 # https://www.postgresql.org/support/versioning/
 # Note: We are using version 18 of the postgres client (while still using postgres 15 for the postgres server) as version 15 has been removed from Alpine 3.23+ https://pkgs.alpinelinux.org/packages?name=postgresql*-client&branch=v3.23&repo=&arch=x86_64&origin=&flagged=&maintainer=
 ARG POSTGRES_VERSION=18
 # https://nginx.org/en/linux_packages.html
 ARG NGINX_VERSION=1.31.2-r1
+# https://pecl.php.net/package/uv
+ARG PHP_UV_VERSION=0.3.0
 
 # =================================================================
 # Get MinIO client
@@ -26,6 +28,7 @@ ARG TARGETARCH
 ARG POSTGRES_VERSION
 ARG CLOUDFLARED_VERSION
 ARG NGINX_VERSION
+ARG PHP_UV_VERSION
 
 WORKDIR /var/www/html
 
@@ -56,16 +59,23 @@ RUN apk upgrade --no-cache && \
 # Install system dependencies
 RUN apk add --no-cache \
     postgresql${POSTGRES_VERSION}-client \
+    nodejs \
+    npm \
+    make \
+    g++ \
+    python3 \
     openssh-client \
     openssl \
     git \
     git-lfs \
     jq \
     lsof \
+    procps \
     vim
 
 # Install PHP extensions
-RUN install-php-extensions sockets
+# uv: Reverb uses an ext-uv event loop instead of stream_select(), which fails at 1024 open files (FD_SETSIZE)
+RUN install-php-extensions sockets uv-${PHP_UV_VERSION}
 
 # Configure shell aliases
 RUN echo "alias ll='ls -al'" >> /etc/profile && \
@@ -84,6 +94,14 @@ RUN mkdir -p /usr/local/bin && \
 # Configure PHP
 COPY docker/development/etc/php/conf.d/zzz-custom-php.ini /usr/local/etc/php/conf.d/zzz-custom-php.ini
 ENV PHP_OPCACHE_ENABLE=0
+
+# Install terminal WebSocket server dependencies
+COPY docker/coolify-terminal/package*.json /terminal/
+RUN npm ci --prefix /terminal && \
+    npm rebuild node-pty --prefix /terminal --update-binary
+COPY docker/coolify-terminal/terminal-server.js /terminal/terminal-server.js
+COPY docker/coolify-terminal/terminal-utils.js /terminal/terminal-utils.js
+RUN chown -R www-data:www-data /terminal
 
 # Configure Nginx and S6 overlay
 COPY docker/development/etc/nginx/conf.d/custom.conf /etc/nginx/conf.d/custom.conf

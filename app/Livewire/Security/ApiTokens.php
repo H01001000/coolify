@@ -2,8 +2,8 @@
 
 namespace App\Livewire\Security;
 
-use App\Models\InstanceSettings;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Validation\Rule;
 use Laravel\Sanctum\PersonalAccessToken;
 use Livewire\Attributes\Locked;
 use Livewire\Component;
@@ -14,7 +14,13 @@ class ApiTokens extends Component
 
     public ?string $description = null;
 
-    public ?int $expiresInDays = 30;
+    /**
+     * Untyped on purpose: Livewire skips hydrating null into typed properties, which
+     * would silently revert a "Never" (null) choice back to the default on the next request.
+     *
+     * @var int|string|null
+     */
+    public $expiresInDays = 30;
 
     public $tokens = [];
 
@@ -27,8 +33,6 @@ class ApiTokens extends Component
         90 => '90 days',
         365 => '1 year',
     ];
-
-    public $isApiEnabled;
 
     #[Locked]
     public bool $canUseRootPermissions = false;
@@ -49,7 +53,6 @@ class ApiTokens extends Component
 
     public function mount()
     {
-        $this->isApiEnabled = InstanceSettings::get()->is_api_enabled;
         $this->canUseRootPermissions = auth()->user()->can('useRootPermissions', PersonalAccessToken::class);
         $this->canUseWritePermissions = auth()->user()->can('useWritePermissions', PersonalAccessToken::class);
         $this->canUseDeployPermissions = auth()->user()->can('useDeployPermissions', PersonalAccessToken::class);
@@ -100,8 +103,6 @@ class ApiTokens extends Component
             $this->permissions = ['root'];
         } elseif ($permissionToUpdate == 'read:sensitive' && ! in_array('read', $this->permissions, true)) {
             $this->permissions[] = 'read';
-        } elseif ($permissionToUpdate == 'deploy' && in_array('deploy', $this->permissions, true)) {
-            $this->permissions = ['deploy'];
         } else {
             if (count($this->permissions) == 0) {
                 $this->permissions = ['read'];
@@ -115,31 +116,41 @@ class ApiTokens extends Component
         try {
             $this->authorize('create', PersonalAccessToken::class);
 
+            $validated = $this->validate([
+                'description' => 'required|min:3|max:255',
+                'expiresInDays' => 'nullable|integer|in:7,30,60,90,365',
+                'permissions' => 'required|array|min:1',
+                'permissions.*' => ['required', 'string', Rule::in(['read', 'read:sensitive', 'write', 'write:sensitive', 'deploy', 'root'])],
+            ]);
+            $permissions = array_values($validated['permissions']);
+
             // Re-evaluate policies fresh against the current authenticated user.
             // Never trust $this->canUse* booleans — they come from the Livewire
             // snapshot which can be replayed from another user's session.
-            if (in_array('root', $this->permissions, true) && ! auth()->user()->can('useRootPermissions', PersonalAccessToken::class)) {
+            if (in_array('root', $permissions, true) && ! auth()->user()->can('useRootPermissions', PersonalAccessToken::class)) {
                 throw new \Exception('You do not have permission to create tokens with root permissions.');
             }
 
-            if (array_intersect(['write', 'write:sensitive'], $this->permissions) && ! auth()->user()->can('useWritePermissions', PersonalAccessToken::class)) {
+            if (array_intersect(['write', 'write:sensitive'], $permissions) && ! auth()->user()->can('useWritePermissions', PersonalAccessToken::class)) {
                 throw new \Exception('You do not have permission to create tokens with write permissions.');
             }
 
-            if (in_array('deploy', $this->permissions, true) && ! auth()->user()->can('useDeployPermissions', PersonalAccessToken::class)) {
+            if (in_array('deploy', $permissions, true) && ! auth()->user()->can('useDeployPermissions', PersonalAccessToken::class)) {
                 throw new \Exception('You do not have permission to create tokens with deploy permissions.');
             }
 
-            if (in_array('read:sensitive', $this->permissions, true) && ! auth()->user()->can('useSensitivePermissions', PersonalAccessToken::class)) {
+            if (in_array('read:sensitive', $permissions, true) && ! auth()->user()->can('useSensitivePermissions', PersonalAccessToken::class)) {
                 throw new \Exception('You do not have permission to create tokens with read:sensitive permissions.');
             }
 
-            $this->validate([
-                'description' => 'required|min:3|max:255',
-                'expiresInDays' => 'nullable|integer|in:7,30,60,90,365',
+            $expiresAt = filled($validated['expiresInDays'] ?? null) ? now()->addDays((int) $validated['expiresInDays']) : null;
+            $token = auth()->user()->createToken($this->description, $permissions, $expiresAt);
+            auditLog('ui.api_token.created', [
+                'team_id' => currentTeam()->id,
+                'api_token_name' => $this->description,
+                'abilities' => $permissions,
+                'expires_at' => $expiresAt?->toIso8601String(),
             ]);
-            $expiresAt = $this->expiresInDays ? now()->addDays($this->expiresInDays) : null;
-            $token = auth()->user()->createToken($this->description, array_values($this->permissions), $expiresAt);
             $this->getTokens();
             // Do NOT strip the numeric prefix (e.g. "69|...") — Sanctum uses it to index and look up tokens.
             session()->flash('token', $token->plainTextToken);
@@ -156,7 +167,12 @@ class ApiTokens extends Component
                 ->where('id', $id)
                 ->firstOrFail();
             $this->authorize('delete', $token);
+            $tokenName = $token->name;
             $token->delete();
+            auditLog('ui.api_token.revoked', [
+                'team_id' => currentTeam()->id,
+                'api_token_name' => $tokenName,
+            ]);
             $this->getTokens();
         } catch (\Exception $e) {
             return handleError($e, $this);

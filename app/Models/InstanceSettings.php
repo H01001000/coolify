@@ -21,7 +21,9 @@ class InstanceSettings extends Model
         'public_port_max',
         'do_not_track',
         'is_auto_update_enabled',
+        'is_backup_before_update_enabled',
         'is_registration_enabled',
+        'disable_registration_when_oauth_enabled',
         'next_channel',
         'smtp_enabled',
         'smtp_from_address',
@@ -57,7 +59,9 @@ class InstanceSettings extends Model
         'avatar_storage_type',
         'avatar_s3_storage_id',
         'image_cdn_url',
+        'file_download_s3_storage_id',
         'is_dashboard_force_https_enabled',
+        'is_passkey_enabled',
     ];
 
     protected $hidden = [
@@ -89,6 +93,9 @@ class InstanceSettings extends Model
 
         'allowed_ip_ranges' => 'array',
         'is_auto_update_enabled' => 'boolean',
+        'is_backup_before_update_enabled' => 'boolean',
+        'is_registration_enabled' => 'boolean',
+        'disable_registration_when_oauth_enabled' => 'boolean',
         'auto_update_frequency' => 'string',
         'update_check_frequency' => 'string',
         'sentinel_token' => 'encrypted',
@@ -97,10 +104,20 @@ class InstanceSettings extends Model
         'webhook_allowed_internal_hosts' => 'array',
         'webhook_allow_localhost' => 'boolean',
         'is_dashboard_force_https_enabled' => 'boolean',
+        'is_passkey_enabled' => 'boolean',
+        'server_validation_rate_limit_seconds' => 'integer',
+        'server_validation_max_failures_per_ip' => 'integer',
+        'server_validation_max_failures_per_team' => 'integer',
     ];
 
     protected static function booted(): void
     {
+        static::creating(function ($settings) {
+            if (blank($settings->getAttributes()['auto_update_frequency'] ?? null)) {
+                $settings->auto_update_frequency = self::randomAutoUpdateFrequency();
+            }
+        });
+
         static::created(function () {
             Once::flush();
         });
@@ -109,11 +126,34 @@ class InstanceSettings extends Model
             // Clear once() cache so subsequent calls get fresh data
             Once::flush();
 
-            // Clear trusted hosts cache when FQDN changes
-            if ($settings->wasChanged('fqdn')) {
-                \Cache::forget('instance_settings_fqdn_host');
+            if ($settings->wasChanged(['fqdn', 'public_ipv4', 'public_ipv6'])) {
+                ServerSetting::followInstanceUrlChange(
+                    ServerSetting::instanceSentinelUrl($settings->getOriginal('fqdn'), $settings->getOriginal('public_ipv4'), $settings->getOriginal('public_ipv6')),
+                    ServerSetting::instanceSentinelUrl($settings->fqdn, $settings->public_ipv4, $settings->public_ipv6),
+                );
             }
         });
+    }
+
+    /**
+     * Daily auto update at a random minute after midnight, so instances do not all pull images from the registry in the same second.
+     */
+    public static function randomAutoUpdateFrequency(): string
+    {
+        return random_int(0, 59).' 0 * * *';
+    }
+
+    public function isPasswordRegistrationAllowed(): bool
+    {
+        if (! $this->is_registration_enabled) {
+            return false;
+        }
+
+        if (! $this->disable_registration_when_oauth_enabled) {
+            return true;
+        }
+
+        return ! OauthSetting::where('enabled', true)->exists();
     }
 
     public function fqdn(): Attribute

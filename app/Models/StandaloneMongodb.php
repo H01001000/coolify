@@ -2,17 +2,20 @@
 
 namespace App\Models;
 
+use App\Traits\Auditable;
 use App\Traits\ClearsGlobalSearchCache;
 use App\Traits\HasDatabaseHealthCheck;
+use App\Traits\HasLogRedactionSetting;
 use App\Traits\HasMetrics;
 use App\Traits\HasSafeStringAttribute;
+use App\Traits\HasSecretManager;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class StandaloneMongodb extends BaseModel
 {
-    use ClearsGlobalSearchCache, HasDatabaseHealthCheck, HasFactory, HasMetrics, HasSafeStringAttribute, SoftDeletes;
+    use Auditable, ClearsGlobalSearchCache, HasDatabaseHealthCheck, HasFactory, HasLogRedactionSetting, HasMetrics, HasSafeStringAttribute, HasSecretManager, SoftDeletes;
 
     protected $fillable = [
         'uuid',
@@ -69,7 +72,9 @@ class StandaloneMongodb extends BaseModel
     ];
 
     protected $casts = [
+        'include_coolify_default_variables' => 'boolean',
         'health_check_enabled' => 'boolean',
+        'mongo_initdb_root_password' => 'encrypted',
         'health_check_interval' => 'integer',
         'health_check_timeout' => 'integer',
         'health_check_retries' => 'integer',
@@ -279,22 +284,6 @@ class StandaloneMongodb extends BaseModel
         return null;
     }
 
-    public function mongoInitdbRootPassword(): Attribute
-    {
-        return Attribute::make(
-            get: function ($value) {
-                try {
-                    return decrypt($value);
-                } catch (\Throwable $th) {
-                    $this->mongo_initdb_root_password = encrypt($value);
-                    $this->save();
-
-                    return $value;
-                }
-            }
-        );
-    }
-
     public function portsMappings(): Attribute
     {
         return Attribute::make(
@@ -352,9 +341,10 @@ class StandaloneMongodb extends BaseModel
                     if (empty($serverIp)) {
                         return null;
                     }
+                    $serverHost = formatHostForUrl($serverIp);
                     $encodedUser = rawurlencode($this->mongo_initdb_root_username);
                     $encodedPass = rawurlencode($this->mongo_initdb_root_password);
-                    $url = "mongodb://{$encodedUser}:{$encodedPass}@{$serverIp}:{$this->public_port}/?directConnection=true";
+                    $url = "mongodb://{$encodedUser}:{$encodedPass}@{$serverHost}:{$this->public_port}/?directConnection=true";
                     if ($this->enable_ssl) {
                         $url .= '&tls=true&tlsCAFile=/etc/mongo/certs/ca.pem';
                         if (in_array($this->ssl_mode, ['verify-full'])) {

@@ -3,6 +3,7 @@
 use App\Events\SentinelSynchronized;
 use App\Http\Controllers\Api\SentinelController;
 use App\Jobs\ProcessSentinelSnapshotJob;
+use App\Models\AuditEvent;
 use App\Models\Server;
 use App\Models\User;
 use Illuminate\Bus\UniqueLock;
@@ -93,6 +94,7 @@ it('does not audit successful sentinel pushes', function () use ($running) {
     pushSentinel($this->token, sentinelPayload($running()))->assertOk();
 
     Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
+    expect(AuditEvent::query()->count())->toBe(0);
 });
 
 it('updates the heartbeat even when the job is skipped', function () use ($running) {
@@ -188,7 +190,7 @@ it('dispatches the job when only the container restart count changes', function 
     Queue::assertPushed(ProcessSentinelSnapshotJob::class, 1);
 });
 
-it('ignores health status changes while container lifecycle state is unchanged', function () {
+it('dispatches the job when only the container health status changes', function () {
     $healthy = [['name' => 'app-1', 'state' => 'running', 'health_status' => 'healthy']];
     $unhealthy = [['name' => 'app-1', 'state' => 'running', 'health_status' => 'unhealthy']];
 

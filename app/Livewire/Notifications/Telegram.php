@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Notifications;
 
+use App\Jobs\SendMessageToTelegramJob;
 use App\Livewire\Notifications\Concerns\TogglesNotificationEvents;
 use App\Models\Team;
 use App\Models\TelegramNotificationSettings;
@@ -26,10 +27,10 @@ class Telegram extends Component
     #[Validate(['boolean'])]
     public bool $telegramEnabled = false;
 
-    #[Validate(['nullable', 'string'])]
+    #[Validate(['required_if:telegramEnabled,true', 'nullable', 'string'])]
     public ?string $telegramToken = null;
 
-    #[Validate(['nullable', 'string'])]
+    #[Validate(['required_if:telegramEnabled,true', 'nullable', 'string'])]
     public ?string $telegramChatId = null;
 
     #[Validate(['boolean'])]
@@ -174,7 +175,9 @@ class Telegram extends Component
             $this->settings->telegram_notifications_server_patch_thread_id = $this->telegramNotificationsServerPatchThreadId;
             $this->settings->telegram_notifications_traefik_outdated_thread_id = $this->telegramNotificationsTraefikOutdatedThreadId;
 
+            $changedFields = array_keys($this->settings->getDirty());
             $this->settings->save();
+            $this->auditNotificationSettings($changedFields);
         } else {
             $this->telegramEnabled = $this->settings->telegram_enabled;
             if (auth()->user()->can('update', $this->settings)) {
@@ -255,9 +258,37 @@ class Telegram extends Component
             ]);
             $this->saveModel();
         } catch (\Throwable $e) {
-            $this->telegramEnabled = false;
+            $this->telegramEnabled = (bool) $this->settings->refresh()->telegram_enabled;
 
             return handleError($e, $this);
+        } finally {
+            $this->dispatch('refresh');
+        }
+    }
+
+    public function toggleTelegramEnabled(): void
+    {
+        try {
+            $this->resetErrorBag();
+
+            if ($this->telegramEnabled) {
+                $this->telegramEnabled = false;
+            } else {
+                $this->validate([
+                    'telegramToken' => 'required',
+                    'telegramChatId' => 'required',
+                ], [
+                    'telegramToken.required' => 'Telegram Token is required.',
+                    'telegramChatId.required' => 'Telegram Chat ID is required.',
+                ]);
+                $this->telegramEnabled = true;
+            }
+
+            $this->saveModel();
+        } catch (\Throwable $e) {
+            $this->syncData();
+
+            handleError($e, $this);
         } finally {
             $this->dispatch('refresh');
         }
@@ -276,7 +307,23 @@ class Telegram extends Component
     {
         try {
             $this->authorize('sendTest', $this->settings);
-            $this->team->notify(new Test(channel: 'telegram'));
+
+            // Send synchronously so that the user sees the error from Telegram (a queued test always "succeeds").
+            $message = (new Test(channel: 'telegram'))->toTelegram();
+            $response = (new SendMessageToTelegramJob(
+                text: $message['message'],
+                buttons: $message['buttons'],
+                token: (string) $this->settings->telegram_token,
+                chatId: (string) $this->settings->telegram_chat_id,
+            ))->sendMessage();
+
+            if ($response->failed()) {
+                $reason = $response->json('description') ?? "HTTP {$response->status()}";
+                $this->dispatch('error', 'Telegram rejected the test notification.', e($reason));
+
+                return;
+            }
+
             $this->dispatch('success', 'Test notification sent.');
         } catch (\Throwable $e) {
             return handleError($e, $this);
@@ -286,5 +333,12 @@ class Telegram extends Component
     public function render()
     {
         return view('livewire.notifications.telegram');
+    }
+
+    private function auditNotificationSettings(array $changedFields): void
+    {
+        if ($changedFields !== []) {
+            auditLog('ui.notifications.telegram.updated', ['team_id' => $this->team->id, 'changed_fields' => $changedFields]);
+        }
     }
 }

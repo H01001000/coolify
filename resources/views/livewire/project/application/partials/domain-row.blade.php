@@ -16,10 +16,7 @@
     };
     $gridClass = 'service-domains-overview-grid';
     $publicUrl = getFqdnWithoutPort($row['url']);
-    $domainParts = $isSuggested ? null : parse_url($publicUrl);
-    $faviconUrl = is_array($domainParts) && isset($domainParts['scheme'], $domainParts['host'])
-        ? $domainParts['scheme'].'://'.$domainParts['host'].'/favicon.ico'
-        : null;
+    $faviconUrl = $isSuggested ? null : \App\Support\DomainFavicon::url($publicUrl, $row['dns_status'] ?? null, $row['expected_ip'] ?? null);
     $rowDirection = $isCompose
         ? ($serviceRedirects[$this->serviceRedirectWireKey($row['service'])] ?? 'both')
         : $redirect;
@@ -60,7 +57,7 @@
                         </span>
                     @endif
                     <a href="{{ $publicUrl }}" target="_blank" rel="noopener noreferrer"
-                        class="min-w-0 flex-1 truncate text-[13px] text-black underline decoration-neutral-300 underline-offset-2 hover:decoration-coollabs dark:text-fg dark:decoration-white/20 dark:hover:decoration-warning"
+                        class="min-w-0 flex-1 truncate text-[13px] text-black underline decoration-neutral-300 underline-offset-2 hover:decoration-coollabs dark:text-fg dark:decoration-white/20 dark:hover:decoration-brand-light"
                         title="{{ $publicUrl }}">
                         {{ $publicUrl }}
                     </a>
@@ -153,16 +150,18 @@
                         @endif
                     @else
                         <button type="button"
-                            @click="openEditDomain(@js($index), @js($row['url']), @js($editingParts), @js($row['service']), @js($isNoindexed ? 'noindex' : 'index'), @js($rowDirection))"
+                            @click="openEditDomain(@js($index), @js($row['url']), @js($editingParts), @js($row['service']), @js($isNoindexed ? 'noindex' : 'index'), @js($rowDirection), @js($row['inherited_port'] ?? null))"
                             class="icon-button shrink-0"
                             title="Domain settings" aria-label="Settings for {{ $publicUrl }}">
                             <x-reicon name="settings" class="size-3.5" />
                         </button>
                         <x-modal-confirmation class="!w-auto shrink-0" title="Remove domain?" buttonTitle="Remove"
-                            isErrorButton submitAction="removeDomainByKey({{ $domainKey }})" :actions="[
+                            isErrorButton canGate="update" :canResource="$application"
+                            submitAction="removeDomainByKey({{ $domainKey }})" :actions="[
                                 'This domain will be removed from the application.',
                                 'Redeploy or restart may be required for proxy changes.',
-                            ]" :confirmWithPassword="false" :confirmWithText="false" step2ButtonText="Remove domain">
+                            ]" :checkboxes="[['id' => 'deleteManagedDns', 'label' => 'Also delete the DNS record created by Coolify, if present.']]"
+                            :confirmWithPassword="false" :confirmWithText="false" step2ButtonText="Remove domain">
                             <x-slot:trigger>
                                 <button type="button" class="icon-button shrink-0 text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300"
                                     title="Remove domain" aria-label="Remove domain">

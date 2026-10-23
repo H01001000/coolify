@@ -34,7 +34,9 @@ class ComplexStatusCheck
             }
             $serverContainers = $containers;
             if ($serverContainers === null) {
-                $output = instant_remote_process(["docker container inspect $(docker container ls -q --filter 'label=coolify.applicationId={$application->id}' --filter 'label=coolify.pullRequestId=0') --format '{{json .}}'"], $server, false);
+                $script = containerIdsByOwnerScript('application', $application->uuid, ['label=coolify.pullRequestId=0'], all: false)
+                    .'; [ -z "$container_ids" ] || docker container inspect $container_ids --format \'{{json .}}\'';
+                $output = instant_remote_process(['sh -c '.escapeshellarg($script)], $server, false);
                 $serverContainers = format_docker_command_output_to_json($output);
             }
 

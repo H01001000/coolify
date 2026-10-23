@@ -6,8 +6,16 @@
         // The OS color picker only speaks hex. Convert it once so the whole theme
         // cascade is authored in OKLCH (sRGB -> linear -> OKLab -> OKLCH).
         const srgbToLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+        // localStorage can hold values from older versions or manual edits, so accept
+        // only #rgb / #rrggbb and fall back to the default color for anything else.
+        window.normalizeThemeColor = (color) => {
+            const hex = String(color ?? '').trim().replace(/^#/, '').toLowerCase();
+            if (/^[a-f\d]{6}$/.test(hex)) return `#${hex}`;
+            if (/^[a-f\d]{3}$/.test(hex)) return `#${hex.replace(/./g, '$&$&')}`;
+            return '#6b16ed';
+        };
         window.hexToOklch = (hex) => {
-            const [r, g, b] = hex.match(/[a-f\d]{2}/gi).map((channel) => srgbToLinear(parseInt(channel, 16) / 255));
+            const [r, g, b] = window.normalizeThemeColor(hex).match(/[a-f\d]{2}/gi).map((channel) => srgbToLinear(parseInt(channel, 16) / 255));
             const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
             const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
             const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
@@ -20,7 +28,7 @@
             return `oklch(${(okL * 100).toFixed(2)}% ${chroma.toFixed(4)} ${hue.toFixed(2)})`;
         };
         window.themeAccentForeground = (color) => {
-            const channels = color.match(/[a-f\d]{2}/gi).map(channel => parseInt(channel, 16) * 0.85 + 255 * 0.15);
+            const channels = window.normalizeThemeColor(color).match(/[a-f\d]{2}/gi).map(channel => parseInt(channel, 16) * 0.85 + 255 * 0.15);
             const luminance = channels
                 .map(channel => channel / 255)
                 .map(channel => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
@@ -30,13 +38,16 @@
         };
         window.applyStoredTheme = () => {
             const theme = localStorage.theme === 'purple' ? 'custom' : (localStorage.theme || 'dark');
-            const themeColor = localStorage.themeColor || '#6b16ed';
+            const themeColor = window.normalizeThemeColor(localStorage.themeColor);
             const customMode = localStorage.customMode || 'dark';
+            document.documentElement.dataset.navStyle = localStorage.navStyle === 'floating' ? 'floating' : 'default';
+            document.documentElement.dataset.navItems = localStorage.navItems === 'flat' ? 'flat' : '3d';
             const isDark = theme === 'dark'
                 || (theme === 'custom' && customMode === 'dark')
                 || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
 
             localStorage.theme = theme;
+            if (localStorage.themeColor) localStorage.themeColor = themeColor;
             document.documentElement.classList.toggle('dark', isDark);
             document.documentElement.dataset.theme = theme === 'custom' ? 'custom' : (isDark ? 'dark' : 'light');
             document.documentElement.style.setProperty('--theme-base-color', window.hexToOklch(themeColor));
@@ -47,9 +58,11 @@
         // Appearance page and the profile dropdown via x-data="themeControls()".
         window.themeControls = () => ({
             theme: localStorage.getItem('theme') === 'purple' ? 'custom' : (localStorage.getItem('theme') || 'dark'),
-            themeColor: localStorage.getItem('themeColor') || '#6b16ed',
+            themeColor: window.normalizeThemeColor(localStorage.getItem('themeColor')),
             customMode: localStorage.getItem('customMode') || 'dark',
-            pageWidth: localStorage.getItem('pageWidth') || 'full',
+            pageWidth: localStorage.getItem('pageWidth') || 'centered',
+            navStyle: localStorage.getItem('navStyle') === 'floating' ? 'floating' : 'default',
+            navItems: localStorage.getItem('navItems') === 'flat' ? 'flat' : '3d',
             themeColorFrame: null,
             pickerOpen: false,
             init() {
@@ -78,6 +91,16 @@
                 this.pageWidth = width;
                 localStorage.setItem('pageWidth', width);
                 window.dispatchEvent(new CustomEvent('page-width-changed', { detail: width }));
+            },
+            setNavStyle(style) {
+                this.navStyle = style;
+                localStorage.setItem('navStyle', style);
+                document.documentElement.dataset.navStyle = style;
+            },
+            setNavItems(style) {
+                this.navItems = style;
+                localStorage.setItem('navItems', style);
+                document.documentElement.dataset.navItems = style;
             },
             previewThemeColor(color) {
                 this.themeColor = color;
@@ -156,8 +179,12 @@
     @env('local')
         <link rel="icon" href="{{ asset('coolify-logo-dev-transparent.png') }}" type="image/png" />
     @else
+        <link rel="icon" href="{{ asset('favicon.ico') }}" sizes="32x32" />
         <link rel="icon" href="{{ asset('coolify-logo.svg') }}" type="image/svg+xml" />
     @endenv
+    <link rel="apple-touch-icon" href="{{ asset('apple-touch-icon.png') }}" />
+    <link rel="manifest" href="{{ asset('site.webmanifest') }}" />
+    <meta name="apple-mobile-web-app-title" content="Coolify" />
     <meta name="csrf-token" content="{{ csrf_token() }}">
     @vite(['resources/js/app.js', 'resources/css/app.css'])
     <script>
@@ -173,7 +200,6 @@
     </style>
     @if (config('app.name') == 'Coolify Cloud')
         <script defer data-domain="app.coolify.io" src="https://analytics.coollabs.io/js/plausible.js"></script>
-        <script src="https://js.sentry-cdn.com/0f8593910512b5cdd48c6da78d4093be.min.js" crossorigin="anonymous"></script>
     @endif
     @auth
         <script type="text/javascript" src="{{ URL::asset('js/echo.js') }}"></script>
@@ -284,13 +310,12 @@
             window.Pusher = Pusher;
             const EchoConstructor = typeof Echo === 'function' ? Echo : Echo.default;
             window.Echo = new EchoConstructor({
-                broadcaster: 'pusher',
-                cluster: "{{ config('constants.pusher.host') }}" || window.location.hostname,
+                broadcaster: 'reverb',
                 key: "{{ config('constants.pusher.app_key') }}" || 'coolify',
                 wsHost: "{{ config('constants.pusher.host') }}" || window.location.hostname,
                 wsPort: "{{ getRealtime() }}",
                 wssPort: "{{ getRealtime() }}",
-                forceTLS: false,
+                forceTLS: window.location.protocol === 'https:',
                 encrypted: true,
                 enableStats: false,
                 enableLogging: true,
@@ -314,30 +339,6 @@
         let checkHealthInterval = null;
         let checkIfIamDeadInterval = null;
 
-        async function copyToClipboard(text) {
-            try {
-                if (navigator.clipboard?.writeText && window.isSecureContext) {
-                    await navigator.clipboard.writeText(text);
-                } else {
-                    const textarea = document.createElement('textarea');
-                    textarea.value = text;
-                    textarea.setAttribute('readonly', '');
-                    textarea.style.position = 'fixed';
-                    textarea.style.left = '-9999px';
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    const copied = document.execCommand('copy');
-                    document.body.removeChild(textarea);
-                    if (!copied) {
-                        throw new Error('Copy command was rejected.');
-                    }
-                }
-                window.Livewire.dispatch('success', 'Copied to clipboard.');
-            } catch (error) {
-                window.Livewire.dispatch('error', 'Failed to copy to clipboard.');
-            }
-        }
-        window.copyToClipboard = copyToClipboard;
         document.addEventListener('livewire:init', () => {
             window.Livewire.on('reloadWindow', (timeout) => {
                 if (timeout) {
