@@ -147,3 +147,27 @@ configuration directory. This permits a generated file inside an existing
 directory mount to retain its current host path even when it differs from the
 container destination. The application root itself and paths outside it are
 rejected. Omitting fs_path retains the existing destination-derived behavior.
+## Direct database environment resolution
+
+After all destination agents support database-backed template environments,
+set `FABRIC_CONFIGURATION_DB_ENV_ENABLED=true` to stop sending resolved
+environment values in template render/apply requests. The client sends
+`template.environment` with the application public UUID, current destination's
+Coolify server ID, and team ID. Node inventory, template source and application
+metadata still use the existing request. Literal files and Compose generation
+are unchanged.
+
+Agents separately enable `FABRIC_COOLIFY_DB_ENV_ENABLED=true` and configure the
+legacy database connection, verified TLS CA/identity, local Coolify server ID,
+and Coolify encryption key through deployment secrets. This does not use
+`FABRIC_DATABASE_URL` or change the Fabric node/RuntimeInstance database.
+
+Fabric owns scoped, consistent read-only database lookup and decryption behind
+its Coolify adapter; its environment resolver and template renderer remain
+separate business layers. Missing/unauthorized lookup returns
+`environment_unavailable`. There is no inline fallback when references are
+enabled. All nodes are still preflighted before any apply, and apply must match
+the preflight SHA-256, including changes in database environment values.
+
+Leave the flag false until the agents, database TLS, keys and per-destination
+server identity have been qualified. Source changes do not enable or deploy it.

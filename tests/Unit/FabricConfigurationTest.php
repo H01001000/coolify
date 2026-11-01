@@ -272,3 +272,49 @@ it('blocks template preview deployments before repository copying can touch host
     expect(fn () => $method->invoke($job))->toThrow(RuntimeException::class, 'preview');
     Http::assertNothingSent();
 });
+
+it('sends destination scoped database references without reading or sending environment values', function () {
+    config(['fabric.configuration_db_env_enabled' => true]);
+    $this->storage->is_template = true;
+    $this->storage->content = '{{range .env}}{{.key}}={{.value}}{{end}}';
+    // No runtime_environment_variables relation is installed: a lazy ORM lookup must not occur.
+    $phases = [];
+    Http::fake(function (Request $request) use (&$phases) {
+        $file = $request['files'][0];
+        $id = $file['template']['data']['node']['id'];
+        expect($file['template']['environment'])->toBe([
+            'application_uuid' => 'configuration-test',
+            'server_id' => (int) $id,
+            'team_id' => 10,
+        ])->and($file['template']['data'])->not->toHaveKey('env');
+        $phase = str_ends_with($request->url(), '/render') ? 'rendered' : 'applied';
+        $digest = hash('sha256', 'database-render-'.$id);
+        if ($phase === 'applied') {
+            expect($file['expected_sha256'])->toBe($digest)
+                ->and(count(array_filter($phases, fn ($p) => $p === 'rendered')))->toBe(3);
+        }
+        $phases[] = $phase;
+
+        return Http::response([$phase => true, 'files' => [['path' => $file['path'], $phase => true, 'sha256' => $digest]]]);
+    });
+    expect($this->fabric->save($this->storage))->toHaveCount(3);
+    Http::assertSentCount(6);
+});
+
+it('does not apply on any node when a database environment preflight is unavailable', function () {
+    config(['fabric.configuration_db_env_enabled' => true]);
+    $this->storage->is_template = true;
+    Http::fake(function (Request $request) {
+        expect($request->url())->toEndWith('/render');
+        $path = $request['files'][0]['path'];
+
+        return Http::response(['rendered' => false, 'files' => [['path' => $path, 'rendered' => false, 'code' => 'environment_unavailable']]], 422);
+    });
+    try {
+        $this->fabric->save($this->storage);
+        test()->fail('Expected preflight failure');
+    } catch (FabricConfigurationSyncException $exception) {
+        expect(array_column($exception->results, 'code'))->toBe(array_fill(0, 3, 'environment_unavailable'));
+    }
+    Http::assertSentCount(3);
+});

@@ -16,7 +16,7 @@ class FabricConfiguration
 {
     private const ERROR_CODES = [
         'invalid_file', 'path_conflict', 'permission_denied', 'cancelled', 'timeout', 'write_failed',
-        'invalid_template', 'template_limit', 'digest_mismatch', 'not_applied',
+        'invalid_template', 'template_limit', 'digest_mismatch', 'not_applied', 'environment_unavailable',
     ];
 
     public function supports(LocalFileVolume $storage): bool
@@ -126,13 +126,22 @@ class FabricConfiguration
                     'data' => [
                         'node' => $current,
                         'nodes' => $inventory,
-                        'env' => $application->runtime_environment_variables->where('is_runtime', true)->map(fn ($env) => [
-                            'key' => (string) $env->key,
-                            'value' => (string) ($env->get_real_environment_variables_with_server($env->value, $application, $servers->firstWhere('id', $current['id'])) ?? ''),
-                        ])->values()->all(),
                         'application' => ['uuid' => $application->uuid, 'name' => $application->name],
                     ],
                 ];
+                if (config('fabric.configuration_db_env_enabled')) {
+                    // Agent resolves values from a read-only, destination-scoped database snapshot.
+                    $targetFile['template']['environment'] = [
+                        'application_uuid' => $application->uuid,
+                        'server_id' => (int) $current['id'],
+                        'team_id' => (int) $primary->team_id,
+                    ];
+                } else {
+                    $targetFile['template']['data']['env'] = $application->runtime_environment_variables->where('is_runtime', true)->map(fn ($env) => [
+                        'key' => (string) $env->key,
+                        'value' => (string) ($env->get_real_environment_variables_with_server($env->value, $application, $servers->firstWhere('id', $current['id'])) ?? ''),
+                    ])->values()->all();
+                }
                 $targets[$current['id']]['file'] = $targetFile;
             }
             $responses = $this->send($application->uuid, $targets, 'render');
